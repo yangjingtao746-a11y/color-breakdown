@@ -757,10 +757,18 @@
         const col = `rgb(${it.rgb.r},${it.rgb.g},${it.rgb.b})`;
         const x = startX + (i % 3) * gapX;
         const y = baseY + Math.floor(i / 3) * 44;
-        legend += `
-          <rect x="${x}" y="${y-18}" width="${box}" height="${box}" rx="4" fill="${col}" stroke="rgba(255,255,255,0.35)" />
-          <text x="${x+box+10}" y="${y-2}">Color ${i+1}</text>
-        `;
+      const hexLabel =
+  "#" + [it.rgb.r, it.rgb.g, it.rgb.b]
+    .map(v => v.toString(16).padStart(2, "0"))
+    .join("")
+    .toUpperCase();
+
+legend += `
+  <rect x="${x}" y="${y-18}" width="${box}" height="${box}" rx="4"
+        fill="${col}" stroke="rgba(255,255,255,0.35)" />
+  <text x="${x+box+10}" y="${y-2}">${hexLabel}</text>
+`;
+
       });
       legend += `</g>`;
     }
