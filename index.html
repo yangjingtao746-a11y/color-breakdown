@@ -263,7 +263,6 @@
         <button id="exportPng" class="btn btn-ghost" type="button">导出PNG（透明底）</button>
         <button id="exportPieOnlyPng" class="btn btn-ghost" type="button">导出PNG（仅饼图透明底）</button>
 
-        <!-- ✅ 新增 SVG 导出 -->
         <button id="exportSvg" class="btn btn-ghost" type="button">导出SVG（透明底）</button>
         <button id="exportPieOnlySvg" class="btn btn-ghost" type="button">导出SVG（仅饼图透明底）</button>
       </div>
@@ -314,7 +313,7 @@
   // 最近一次聚类结果
   let lastResult = null;  // { centers, counts }
   // 最近一次渲染（排序+模式之后）的数据：给 SVG/导出复用
-  let lastRender = null;  // { items: [{rgb:{r,g,b}, pct, count}], showLegend }
+  let lastRender = null;  // { items: [{rgb:{r,g,b}, cmyk:{c,m,y,k}, pct, count}], showLegend }
 
   function setStatus(msg){ statusEl.textContent = msg || ""; }
   function showExports(show){ exportsWrap.classList.toggle('show', !!show); }
@@ -332,6 +331,28 @@
   function dist2(a,b){
     const dr=a[0]-b[0], dg=a[1]-b[1], db=a[2]-b[2];
     return dr*dr + dg*dg + db*db;
+  }
+
+  // ===== RGB -> CMYK (approx.) =====
+  function rgbToCmyk(r, g, b){
+    const rr = r / 255, gg = g / 255, bb = b / 255;
+    const k = 1 - Math.max(rr, gg, bb);
+
+    // pure black
+    if(k >= 0.999999){
+      return { c: 0, m: 0, y: 0, k: 100 };
+    }
+
+    const c = (1 - rr - k) / (1 - k);
+    const m = (1 - gg - k) / (1 - k);
+    const y = (1 - bb - k) / (1 - k);
+
+    return {
+      c: Math.round(c * 100),
+      m: Math.round(m * 100),
+      y: Math.round(y * 100),
+      k: Math.round(k * 100),
+    };
   }
 
   // ===== K-means++ init =====
@@ -436,10 +457,11 @@
     // 2) 按占比降序
     items.sort((a,b)=> b.pct - a.pct);
 
-    // 3) 模式应用到颜色
+    // 3) 模式应用到颜色 + 计算 CMYK（approx.）
     const rendered = items.map(it=>{
       const rgb = applyModeToColor(it.center, mode);
-      return { rgb, pct: it.pct, count: it.count };
+      const cmyk = rgbToCmyk(rgb.r, rgb.g, rgb.b);
+      return { rgb, cmyk, pct: it.pct, count: it.count };
     });
 
     // ✅ legend 自动隐藏：K>=7 不显示
@@ -496,6 +518,7 @@
           <div>
             <div class="mono">${h}</div>
             <div class="small muted">RGB(${it.rgb.r}, ${it.rgb.g}, ${it.rgb.b})</div>
+            <div class="small muted">CMYK(${it.cmyk.c}, ${it.cmyk.m}, ${it.cmyk.y}, ${it.cmyk.k}) <span class="muted">(approx.)</span></div>
           </div>
         </div>
         <div style="text-align:right;">
@@ -698,32 +721,26 @@
     const items = lastRender.items;
     const showLegend = (!pieOnly) && lastRender.showLegend;
 
-    // 画布尺寸：饼图导出用正方形更通用
-    // 全图导出给一点下方空间放 legend（若显示）
     const W = 1200;
     const H = showLegend ? 900 : 820;
 
     const cx = W/2;
-    const cy = 420;     // 饼图中心偏上，下面留 legend/刻字
+    const cy = 420;
     const r  = 320;
 
     let start = -Math.PI/2; // 12点开始
     const paths = [];
 
-    // 生成扇形
-    items.forEach((it, idx)=>{
+    items.forEach((it)=>{
       const frac = it.pct / 100;
       const end = start + frac * Math.PI * 2; // clockwise
       const fill = `rgb(${it.rgb.r},${it.rgb.g},${it.rgb.b})`;
-
-      // 极小占比避免退化：给一个最小角度（可选）
       const d = wedgePath(cx, cy, r, start, end);
 
       paths.push(`<path d="${d}" fill="${fill}" stroke="rgba(255,255,255,0.35)" stroke-width="1"/>`);
       start = end;
     });
 
-    // legend（仅当 K<=6 且不是 pieOnly 时）
     let legend = "";
     if(showLegend){
       const box = 18;
@@ -744,7 +761,6 @@
       legend += `</g>`;
     }
 
-    // 刻字署名（右下角）
     const sigX = W - 40;
     const sigY = H - 26;
 
