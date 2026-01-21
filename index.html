@@ -469,7 +469,11 @@
 
     lastRender = { items: rendered, showLegend };
 
-    const labels = rendered.map((_,i)=>`Color ${i+1}`);
+    const labels = rendered.map(it => {
+  return `#${[it.rgb.r, it.rgb.g, it.rgb.b]
+    .map(v => v.toString(16).padStart(2, '0'))
+    .join('')}`.toUpperCase();
+});
     const colors = rendered.map(it=> `rgb(${it.rgb.r},${it.rgb.g},${it.rgb.b})`);
     const data = rendered.map(it=> Number(it.pct.toFixed(2)));
 
