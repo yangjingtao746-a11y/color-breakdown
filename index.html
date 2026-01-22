@@ -84,6 +84,7 @@
       box-shadow:none;
     }
 
+    /* 录入按钮：拖拽提示层 + 扫光 */
     .upload-btn{ position:relative; overflow:hidden; }
     .upload-btn__hint{
       position:absolute; inset:0;
@@ -254,6 +255,9 @@
 
       <button id="run" class="btn btn-primary disabled" type="button">开始分析</button>
 
+      <!-- ✅ 新增：吸色按钮 -->
+      <button id="pick" class="btn btn-primary disabled" type="button">开始吸色</button>
+
       <div id="exports" class="exports">
         <button id="exportPng" class="btn btn-ghost" type="button">导出PNG（透明底）</button>
         <button id="exportPieOnlyPng" class="btn btn-ghost" type="button">导出PNG（仅饼图透明底）</button>
@@ -263,6 +267,10 @@
 
         <button id="exportSwatchPng" class="btn btn-ghost" type="button">导出色卡PNG</button>
         <button id="exportSwatchSvg" class="btn btn-ghost" type="button">导出色卡SVG</button>
+
+        <!-- ✅ 新增：吸色色卡导出 -->
+        <button id="exportPickSwatchPng" class="btn btn-ghost" type="button">导出吸色色卡PNG（≥5%）</button>
+        <button id="exportPickSwatchSvg" class="btn btn-ghost" type="button">导出吸色色卡SVG（≥5%）</button>
       </div>
 
       <span id="status" class="small muted"></span>
@@ -292,6 +300,7 @@
   const stepEl = document.getElementById('step');
   const modeEl = document.getElementById('mode');
   const runEl = document.getElementById('run');
+  const pickEl = document.getElementById('pick');
   const statusEl = document.getElementById('status');
   const previewEl = document.getElementById('preview');
   const listEl = document.getElementById('list');
@@ -306,14 +315,21 @@
   const exportSwatchPngBtn = document.getElementById('exportSwatchPng');
   const exportSwatchSvgBtn = document.getElementById('exportSwatchSvg');
 
+  const exportPickSwatchPngBtn = document.getElementById('exportPickSwatchPng');
+  const exportPickSwatchSvgBtn = document.getElementById('exportPickSwatchSvg');
+
   const SIGN_TEXT = "Color Breakdown · JINTiao";
 
   let currentImage = null;
   let chart = null;
 
-  let lastResult = null;
-  let lastRender = null;
+  // K-means 结果
+  let lastResult = null;   // { centers, counts }
+  let lastRender = null;   // { items: [...], showLegend }  (K-means 渲染后的)
+  // 吸色结果
+  let lastPickRender = null; // { items: [...], showLegend }
 
+  // ========= 初始化：聚类颜色数 1 - 15 =========
   (function initKOptions(){
     const frag = document.createDocumentFragment();
     for(let i=1;i<=15;i++){
@@ -327,10 +343,11 @@
 
   function setStatus(msg){ statusEl.textContent = msg || ""; }
   function showExports(show){ exportsWrap.classList.toggle('show', !!show); }
-  function enableRun(enable){ runEl.classList.toggle('disabled', !enable); }
+  function enableBtn(btn, enable){ btn.classList.toggle('disabled', !enable); }
 
   showExports(false);
-  enableRun(false);
+  enableBtn(runEl,false);
+  enableBtn(pickEl,false);
 
   uploadBtn.addEventListener('click', () => fileEl.click());
 
@@ -357,6 +374,18 @@
     return { c:to100(c), m:to100(m), y:to100(y), k:to100(k) };
   }
 
+  function applyModeToColor(center, mode){
+    const r = Math.round(center[0]);
+    const g = Math.round(center[1]);
+    const b = Math.round(center[2]);
+    if(mode === "mono"){
+      const l = Math.round(0.299*r + 0.587*g + 0.114*b);
+      return { r:l, g:l, b:l };
+    }
+    return { r, g, b };
+  }
+
+  // ===== K-means++ init =====
   function initKMeansPP(pixels, k){
     const centers = [];
     const n = pixels.length;
@@ -430,50 +459,20 @@
     return { centers, counts };
   }
 
-  function applyModeToColor(center, mode){
-    const r = Math.round(center[0]);
-    const g = Math.round(center[1]);
-    const b = Math.round(center[2]);
-    if(mode === "mono"){
-      const l = Math.round(0.299*r + 0.587*g + 0.114*b);
-      return { r:l, g:l, b:l };
+  // ===== 公共：画图 + 列表渲染 =====
+  function renderItemsToUI(items, {titleHint=""} = {}){
+    if(!items || !items.length){
+      if(chart){ chart.destroy(); chart=null; }
+      listEl.innerHTML = "";
+      return;
     }
-    return { r, g, b };
-  }
 
-  function renderFromResult(result){
-    if(!result) return;
-
-    const mode = modeEl.value;
-    const total = result.counts.reduce((a,b)=>a+b,0);
-
-    let items = result.centers.map((c,i)=>({
-      center: c,
-      count: result.counts[i],
-      pct: result.counts[i] / total * 100
-    }));
-
-    items.sort((a,b)=> b.pct - a.pct);
-
-    const rendered = items.map(it=>{
-      const rgb = applyModeToColor(it.center, mode);
-      const hex = rgbToHexStr(rgb);
-      const cmyk = rgbToCmyk(rgb);
-      return { rgb, hex, cmyk, pct: it.pct, count: it.count };
-    });
-
-    const showLegend = rendered.length <= 6;
-    lastRender = { items: rendered, showLegend };
-
-    const labels = rendered.map(it => it.hex);
-    const colors = rendered.map(it=> `rgb(${it.rgb.r},${it.rgb.g},${it.rgb.b})`);
-    const data = rendered.map(it=> Number(it.pct.toFixed(2)));
+    const showLegend = items.length <= 6;
+    const labels = items.map(it => it.hex);
+    const colors = items.map(it=> `rgb(${it.rgb.r},${it.rgb.g},${it.rgb.b})`);
+    const data = items.map(it=> Number(it.pct.toFixed(2)));
 
     if(chart) chart.destroy();
-
-    // ✅ hover 外扩：电脑 10，手机 6（更稳）
-    const isCoarse = window.matchMedia && window.matchMedia('(pointer: coarse)').matches;
-
     chart = new Chart(pieCanvas.getContext('2d'), {
       type:'pie',
       data:{
@@ -481,15 +480,7 @@
         datasets:[{
           data,
           backgroundColor: colors,
-
-          // ✅ 关键：hover 不变色，只外扩
-          hoverBackgroundColor: colors,
-          hoverOffset: isCoarse ? 6 : 10,
-
-          borderColor: "rgba(255,255,255,0.55)",
-          hoverBorderColor: "rgba(255,255,255,0.55)",
-          borderWidth: 1,
-          hoverBorderWidth: 1
+          borderWidth: 1
         }]
       },
       options:{
@@ -514,7 +505,7 @@
     });
 
     listEl.innerHTML = "";
-    rendered.forEach((it)=>{
+    items.forEach((it)=>{
       const div = document.createElement('div');
       div.className = 'item';
       div.innerHTML = `
@@ -535,7 +526,50 @@
     });
   }
 
+  // ===== K-means Render =====
+  function renderFromResult(result){
+    if(!result) return;
+
+    const mode = modeEl.value;
+    const total = result.counts.reduce((a,b)=>a+b,0);
+
+    let items = result.centers.map((c,i)=>({
+      center: c,
+      count: result.counts[i],
+      pct: result.counts[i] / total * 100
+    }));
+
+    items.sort((a,b)=> b.pct - a.pct);
+
+    const rendered = items.map(it=>{
+      const rgb = applyModeToColor(it.center, mode);
+      const hex = rgbToHexStr(rgb);
+      const cmyk = rgbToCmyk(rgb);
+      return { rgb, hex, cmyk, pct: it.pct, count: it.count };
+    });
+
+    lastRender = { items: rendered, showLegend: rendered.length<=6 };
+    renderItemsToUI(rendered);
+  }
+
   modeEl.addEventListener('change', ()=>{
+    if(lastPickRender){
+      // 模式改变：让吸色也跟着变（灰阶/彩色切换）
+      // 重新把吸色 items 按模式转换一次
+      const mode = modeEl.value;
+      const base = lastPickRender._baseCenters;
+      const total = lastPickRender._total;
+      const rendered = base.map(b=>{
+        const rgb = applyModeToColor([b.r,b.g,b.b], mode);
+        const hex = rgbToHexStr(rgb);
+        const cmyk = rgbToCmyk(rgb);
+        return { rgb, hex, cmyk, pct: b.count/total*100, count: b.count };
+      }).sort((a,b)=> b.pct - a.pct);
+
+      lastPickRender.items = rendered;
+      renderItemsToUI(rendered);
+      return;
+    }
     if(lastResult) renderFromResult(lastResult);
   });
 
@@ -548,10 +582,15 @@
       previewEl.src = url;
       previewEl.classList.remove('empty');
       setStatus(`已录入：${file.name}（${img.width}×${img.height}）`);
-      enableRun(true);
+      enableBtn(runEl,true);
+      enableBtn(pickEl,true);
       showExports(false);
+
       lastResult = null;
       lastRender = null;
+      lastPickRender = null;
+      if(chart){ chart.destroy(); chart=null; }
+      listEl.innerHTML = "";
     };
     img.onerror = () => setStatus("图片加载失败");
     img.src = url;
@@ -559,17 +598,8 @@
 
   fileEl.addEventListener('change', (e)=> loadFile(e.target.files?.[0]));
 
-  function analyze(){
-    if(!currentImage){
-      alert("请先录入一张图片（点击“录入”或拖拽到按钮上）");
-      return;
-    }
-
-    const k = parseInt(kEl.value, 10);
+  function getSamplePixelsFromImage(){
     const step = parseInt(stepEl.value, 10);
-
-    setStatus("分析中…");
-    showExports(false);
 
     const c = document.createElement('canvas');
     const ctx = c.getContext('2d', { willReadFrequently:true });
@@ -594,6 +624,21 @@
         pixels.push([d[i], d[i+1], d[i+2]]);
       }
     }
+    return pixels;
+  }
+
+  function analyze(){
+    if(!currentImage){
+      alert("请先录入一张图片（点击“录入”或拖拽到按钮上）");
+      return;
+    }
+
+    const k = parseInt(kEl.value, 10);
+
+    setStatus("分析中…");
+    showExports(false);
+
+    const pixels = getSamplePixelsFromImage();
 
     if(pixels.length < k){
       setStatus("样本不足，无法聚类。");
@@ -601,20 +646,111 @@
       return;
     }
 
+    // 清空吸色结果（避免模式切换时混用）
+    lastPickRender = null;
+
     setTimeout(()=>{
       const result = kmeansRGB(pixels, k, 35);
       lastResult = result;
       renderFromResult(result);
-      setStatus(`完成：${k} 色聚类（抽样步长 ${step}，样本 ${pixels.length}）`);
+      setStatus(`完成：${k} 色聚类（抽样步长 ${parseInt(stepEl.value,10)}，样本 ${pixels.length}）`);
       showExports(true);
     }, 20);
   }
 
   runEl.addEventListener('click', analyze);
 
+  // ===== ✅ 吸色：统计分箱，取 >= 5% =====
+  function pickColors(){
+    if(!currentImage){
+      alert("请先录入一张图片（点击“录入”或拖拽到按钮上）");
+      return;
+    }
+
+    setStatus("吸色中…（筛选 ≥ 5%）");
+    showExports(false);
+
+    // 量化等级：16 => 每通道 0~15（4096 bins），快且稳定
+    const Q = 16;
+    const shift = 8 - Math.log2(Q); // Q=16 => shift=4
+    const thresholdPct = 5;
+
+    const pixels = getSamplePixelsFromImage();
+    const total = pixels.length;
+
+    // bin: key -> {count, rs,gs,bs}
+    const map = new Map();
+
+    for(const p of pixels){
+      const r = p[0], g = p[1], b = p[2];
+      const qr = r >> shift;
+      const qg = g >> shift;
+      const qb = b >> shift;
+      const key = (qr<<16) | (qg<<8) | qb;
+
+      let v = map.get(key);
+      if(!v){
+        v = { count:0, rs:0, gs:0, bs:0 };
+        map.set(key, v);
+      }
+      v.count++;
+      v.rs += r; v.gs += g; v.bs += b;
+    }
+
+    // 转成数组 + 按占比排序
+    let bins = [];
+    for(const [key, v] of map.entries()){
+      const pct = v.count / total * 100;
+      if(pct < thresholdPct) continue;
+
+      const r = Math.round(v.rs / v.count);
+      const g = Math.round(v.gs / v.count);
+      const b = Math.round(v.bs / v.count);
+
+      bins.push({ r,g,b, count: v.count, pct });
+    }
+
+    bins.sort((a,b)=> b.pct - a.pct);
+
+    if(!bins.length){
+      setStatus(`吸色完成：没有颜色达到 ≥ ${thresholdPct}%（建议调小阈值或降低抽样步长）`);
+      // 依然允许导出？这里不展示导出
+      return;
+    }
+
+    // 保存一份“基础中心”，用于模式切换时再算灰阶
+    lastPickRender = {
+      _baseCenters: bins.map(b=>({r:b.r,g:b.g,b:b.b,count:b.count})),
+      _total: total,
+      items: []
+    };
+
+    // 生成当前模式下渲染 items
+    const mode = modeEl.value;
+    const rendered = bins.map(b=>{
+      const rgb = applyModeToColor([b.r,b.g,b.b], mode);
+      const hex = rgbToHexStr(rgb);
+      const cmyk = rgbToCmyk(rgb);
+      return { rgb, hex, cmyk, pct: b.pct, count: b.count };
+    });
+
+    lastPickRender.items = rendered;
+
+    renderItemsToUI(rendered);
+    setStatus(`吸色完成：${rendered.length} 个颜色 ≥ ${thresholdPct}%（样本 ${total}）`);
+    showExports(true);
+  }
+
+  pickEl.addEventListener('click', ()=>{
+    // 清空 K-means（避免你误以为是同一批）
+    lastResult = null;
+    lastRender = null;
+    pickColors();
+  });
+
   // ===== PNG 导出（饼图截图）=====
   function exportChartPngWithSignature({ pieOnly }){
-    if(!chart) return alert("请先分析图片生成饼图");
+    if(!chart) return alert("请先生成饼图");
 
     const doExport = () => {
       const srcCanvas = chart.canvas;
@@ -643,9 +779,7 @@
       octx.restore();
 
       const dataUrl = out.toDataURL("image/png");
-      const filename = pieOnly
-        ? "color-breakdown_jintiao_pie-only.png"
-        : "color-breakdown_jintiao.png";
+      const filename = pieOnly ? "color-breakdown_jintiao_pie-only.png" : "color-breakdown_jintiao.png";
 
       const a = document.createElement("a");
       a.href = dataUrl;
@@ -674,10 +808,280 @@
   exportPngBtn.addEventListener("click", ()=> exportChartPngWithSignature({ pieOnly:false }));
   exportPieOnlyPngBtn.addEventListener("click", ()=> exportChartPngWithSignature({ pieOnly:true }));
 
-  // ===== SVG / 色卡导出部分：你原样保留（下面省略：与你发的代码一致）=====
-  // ...（此处保持你原有的 buildPieSvg、exportSwatchPng、exportSwatchSvg、拖拽逻辑不变）
-  // 由于你已贴了完整版本，我这里不重复粘贴后半段，避免你复制时出错。
-  // 你只需要把上面 renderFromResult 的 Chart dataset 改成 hoverOffset 版本就能达成效果。
+  // ===== SVG 导出（饼图矢量）=====
+  function svgEscape(s){
+    return String(s)
+      .replaceAll("&","&amp;")
+      .replaceAll("<","&lt;")
+      .replaceAll(">","&gt;")
+      .replaceAll('"',"&quot;")
+      .replaceAll("'","&#39;");
+  }
+
+  function polarToCartesian(cx, cy, r, angleRad){
+    return { x: cx + r * Math.cos(angleRad), y: cy + r * Math.sin(angleRad) };
+  }
+
+  function wedgePath(cx, cy, r, startRad, endRad){
+    const p1 = polarToCartesian(cx, cy, r, startRad);
+    const p2 = polarToCartesian(cx, cy, r, endRad);
+    const delta = endRad - startRad;
+    const largeArc = (delta % (Math.PI*2)) > Math.PI ? 1 : 0;
+    const sweep = 1;
+    return `M ${cx} ${cy} L ${p1.x} ${p1.y} A ${r} ${r} 0 ${largeArc} ${sweep} ${p2.x} ${p2.y} Z`;
+  }
+
+  function downloadSvg(svgText, filename){
+    const blob = new Blob([svgText], { type: "image/svg+xml;charset=utf-8" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = filename;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    URL.revokeObjectURL(url);
+  }
+
+  function getActiveItems(){
+    if(lastPickRender?.items?.length) return lastPickRender.items;
+    if(lastRender?.items?.length) return lastRender.items;
+    return null;
+  }
+
+  function buildPieSvg({ pieOnly }){
+    const items = getActiveItems();
+    if(!items) return null;
+
+    const showLegend = (!pieOnly) && (items.length <= 6);
+
+    const W = 1200;
+    const H = showLegend ? 900 : 820;
+
+    const cx = W/2;
+    const cy = 420;
+    const r  = 320;
+
+    let start = -Math.PI/2;
+    const paths = [];
+
+    items.forEach((it)=>{
+      const frac = it.pct / 100;
+      const end = start + frac * Math.PI * 2;
+      const fill = `rgb(${it.rgb.r},${it.rgb.g},${it.rgb.b})`;
+      const d = wedgePath(cx, cy, r, start, end);
+      paths.push(`<path d="${d}" fill="${fill}" stroke="rgba(255,255,255,0.35)" stroke-width="1"/>`);
+      start = end;
+    });
+
+    let legend = "";
+    if(showLegend){
+      const box = 18;
+      const gapX = 240;
+      const startX = 150;
+      const baseY = 780;
+
+      legend += `<g font-family="system-ui, -apple-system, Segoe UI, Roboto, PingFang SC, Microsoft YaHei, sans-serif" font-size="20" fill="rgba(255,255,255,0.92)">`;
+      items.forEach((it, i)=>{
+        const col = `rgb(${it.rgb.r},${it.rgb.g},${it.rgb.b})`;
+        const x = startX + (i % 3) * gapX;
+        const y = baseY + Math.floor(i / 3) * 44;
+        legend += `
+          <rect x="${x}" y="${y-18}" width="${box}" height="${box}" rx="4" fill="${col}" stroke="rgba(255,255,255,0.35)" />
+          <text x="${x+box+10}" y="${y-2}">${svgEscape(it.hex)}</text>
+        `;
+      });
+      legend += `</g>`;
+    }
+
+    const sigX = W - 40;
+    const sigY = H - 26;
+
+    return `<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="${W}" height="${H}" viewBox="0 0 ${W} ${H}">
+  <defs>
+    <filter id="softShadow" x="-20%" y="-20%" width="140%" height="140%">
+      <feDropShadow dx="0" dy="2" stdDeviation="3" flood-color="rgba(0,0,0,0.35)"/>
+    </filter>
+  </defs>
+
+  <g>
+    ${paths.join("\n    ")}
+  </g>
+
+  ${legend}
+
+  <text x="${sigX}" y="${sigY}"
+        text-anchor="end"
+        font-family="ui-monospace, Menlo, Consolas, monospace"
+        font-size="20"
+        fill="rgba(255,255,255,0.28)"
+        filter="url(#softShadow)">${svgEscape(SIGN_TEXT)}</text>
+</svg>`;
+  }
+
+  exportSvgBtn.addEventListener("click", ()=>{
+    const svg = buildPieSvg({ pieOnly: false });
+    if(!svg) return alert("请先生成饼图");
+    downloadSvg(svg, "color-breakdown_jintiao.svg");
+  });
+
+  exportPieOnlySvgBtn.addEventListener("click", ()=>{
+    const svg = buildPieSvg({ pieOnly: true });
+    if(!svg) return alert("请先生成饼图");
+    downloadSvg(svg, "color-breakdown_jintiao_pie-only.svg");
+  });
+
+  // ===== 色卡导出（PNG + SVG）=====
+  function buildSwatchLayout(n){
+    const cols = Math.min(5, Math.max(1, n));
+    const rows = Math.ceil(n / cols);
+    return { cols, rows };
+  }
+
+  function exportSwatchPng(items, filename){
+    const n = items.length;
+    const { cols, rows } = buildSwatchLayout(n);
+
+    const margin = 48;
+    const gap = 26;
+    const cardW = 210;
+    const rectH = 140;
+    const textH = 86;
+
+    const W = margin*2 + cols*cardW + (cols-1)*gap;
+    const H = margin*2 + rows*(rectH + textH) + (rows-1)*gap + 34;
+
+    const c = document.createElement("canvas");
+    c.width = W;
+    c.height = H;
+    const ctx = c.getContext("2d");
+
+    ctx.fillStyle = "#ffffff";
+    ctx.fillRect(0,0,W,H);
+
+    for(let i=0;i<n;i++){
+      const it = items[i];
+      const col = i % cols;
+      const row = Math.floor(i / cols);
+
+      const x = margin + col*(cardW + gap);
+      const y = margin + row*(rectH + textH + gap);
+
+      ctx.fillStyle = it.hex;
+      ctx.fillRect(x, y, cardW, rectH);
+
+      ctx.strokeStyle = "rgba(0,0,0,0.12)";
+      ctx.lineWidth = 2;
+      ctx.strokeRect(x, y, cardW, rectH);
+
+      const tx = x;
+      const ty = y + rectH + 18;
+
+      ctx.fillStyle = "#111";
+      ctx.font = "700 16px ui-monospace, Menlo, Consolas, monospace";
+      ctx.fillText(it.hex, tx, ty);
+
+      ctx.fillStyle = "rgba(0,0,0,0.72)";
+      ctx.font = "12px ui-monospace, Menlo, Consolas, monospace";
+      ctx.fillText(`RGB: ${it.rgb.r}, ${it.rgb.g}, ${it.rgb.b}`, tx, ty + 22);
+
+      ctx.fillStyle = "rgba(0,0,0,0.65)";
+      ctx.font = "12px ui-monospace, Menlo, Consolas, monospace";
+      ctx.fillText(`CMYK: C${it.cmyk.c} M${it.cmyk.m} Y${it.cmyk.y} K${it.cmyk.k}`, tx, ty + 42);
+
+      ctx.fillStyle = "rgba(0,0,0,0.38)";
+      ctx.font = "11px system-ui, -apple-system, Segoe UI, Roboto, PingFang SC, Microsoft YaHei, sans-serif";
+      ctx.fillText(`${it.pct.toFixed(2)}%`, tx, ty + 64);
+    }
+
+    ctx.textBaseline = "bottom";
+    ctx.fillStyle = "rgba(0,0,0,0.30)";
+    ctx.font = "12px ui-monospace, Menlo, Consolas, monospace";
+    ctx.fillText(SIGN_TEXT, W - margin, H - 16);
+
+    const a = document.createElement("a");
+    a.href = c.toDataURL("image/png");
+    a.download = filename;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+  }
+
+  function exportSwatchSvg(items, filename){
+    const n = items.length;
+    const { cols, rows } = buildSwatchLayout(n);
+
+    const margin = 48;
+    const gap = 26;
+    const cardW = 210;
+    const rectH = 140;
+    const textH = 86;
+
+    const W = margin*2 + cols*cardW + (cols-1)*gap;
+    const H = margin*2 + rows*(rectH + textH) + (rows-1)*gap + 34;
+
+    let body = '';
+    for(let i=0;i<n;i++){
+      const it = items[i];
+      const col = i % cols;
+      const row = Math.floor(i / cols);
+
+      const x = margin + col*(cardW + gap);
+      const y = margin + row*(rectH + textH + gap);
+
+      const tx = x;
+      const ty = y + rectH + 18;
+
+      body += `
+        <rect x="${x}" y="${y}" width="${cardW}" height="${rectH}" fill="${it.hex}" />
+        <rect x="${x}" y="${y}" width="${cardW}" height="${rectH}" fill="none" stroke="rgba(0,0,0,0.12)" stroke-width="2" />
+
+        <text x="${tx}" y="${ty}" font-family="ui-monospace, Menlo, Consolas, monospace" font-size="16" font-weight="700" fill="#111">${svgEscape(it.hex)}</text>
+        <text x="${tx}" y="${ty+22}" font-family="ui-monospace, Menlo, Consolas, monospace" font-size="12" fill="rgba(0,0,0,0.72)">${svgEscape(`RGB: ${it.rgb.r}, ${it.rgb.g}, ${it.rgb.b}`)}</text>
+        <text x="${tx}" y="${ty+42}" font-family="ui-monospace, Menlo, Consolas, monospace" font-size="12" fill="rgba(0,0,0,0.65)">${svgEscape(`CMYK: C${it.cmyk.c} M${it.cmyk.m} Y${it.cmyk.y} K${it.cmyk.k}`)}</text>
+        <text x="${tx}" y="${ty+64}" font-family="system-ui, -apple-system, Segoe UI, Roboto, PingFang SC, Microsoft YaHei, sans-serif" font-size="11" fill="rgba(0,0,0,0.38)">${svgEscape(`${it.pct.toFixed(2)}%`)}</text>
+      `;
+    }
+
+    const sigX = W - margin;
+    const sigY = H - 16;
+
+    const svg = `<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="${W}" height="${H}" viewBox="0 0 ${W} ${H}">
+  <rect x="0" y="0" width="${W}" height="${H}" fill="#ffffff" />
+  ${body}
+  <text x="${sigX}" y="${sigY}" text-anchor="end"
+        font-family="ui-monospace, Menlo, Consolas, monospace"
+        font-size="12" fill="rgba(0,0,0,0.30)">${svgEscape(SIGN_TEXT)}</text>
+</svg>`;
+
+    downloadSvg(svg, filename);
+  }
+
+  // 普通色卡导出：当前“活跃结果”（吸色优先，否则聚类）
+  exportSwatchPngBtn.addEventListener("click", ()=>{
+    const items = getActiveItems();
+    if(!items) return alert("请先生成颜色结果");
+    exportSwatchPng(items, "color-breakdown_swatch_jintiao.png");
+  });
+  exportSwatchSvgBtn.addEventListener("click", ()=>{
+    const items = getActiveItems();
+    if(!items) return alert("请先生成颜色结果");
+    exportSwatchSvg(items, "color-breakdown_swatch_jintiao.svg");
+  });
+
+  // 吸色色卡导出：只导出“≥5%吸色结果”
+  exportPickSwatchPngBtn.addEventListener("click", ()=>{
+    const items = lastPickRender?.items;
+    if(!items || !items.length) return alert("请先点击“开始吸色”生成 ≥5% 颜色");
+    exportSwatchPng(items, "color-breakdown_pick_swatch_ge5_jintiao.png");
+  });
+  exportPickSwatchSvgBtn.addEventListener("click", ()=>{
+    const items = lastPickRender?.items;
+    if(!items || !items.length) return alert("请先点击“开始吸色”生成 ≥5% 颜色");
+    exportSwatchSvg(items, "color-breakdown_pick_swatch_ge5_jintiao.svg");
+  });
 
   // ===== 拖拽到按钮上传 =====
   function preventDefaults(e){ e.preventDefault(); e.stopPropagation(); }
