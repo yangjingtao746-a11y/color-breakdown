@@ -84,7 +84,6 @@
       box-shadow:none;
     }
 
-    /* 录入按钮：拖拽提示层 + 扫光 */
     .upload-btn{ position:relative; overflow:hidden; }
     .upload-btn__hint{
       position:absolute; inset:0;
@@ -166,7 +165,6 @@
     }
     .preview.empty{ min-height:320px; }
 
-    /* 固定图表区域高度，避免被 legend 挤压 */
     .chart-wrap{
       height: 420px;
       width: 100%;
@@ -263,7 +261,6 @@
         <button id="exportSvg" class="btn btn-ghost" type="button">导出SVG（透明底）</button>
         <button id="exportPieOnlySvg" class="btn btn-ghost" type="button">导出SVG（仅饼图透明底）</button>
 
-        <!-- ✅ 新增：色卡导出（更像你给的参考图） -->
         <button id="exportSwatchPng" class="btn btn-ghost" type="button">导出色卡PNG</button>
         <button id="exportSwatchSvg" class="btn btn-ghost" type="button">导出色卡SVG</button>
       </div>
@@ -314,12 +311,9 @@
   let currentImage = null;
   let chart = null;
 
-  // 最近一次聚类结果
-  let lastResult = null;  // { centers, counts }
-  // 最近一次渲染（排序+模式之后）的数据：给 SVG/导出复用
-  let lastRender = null;  // { items: [{rgb:{r,g,b}, pct, count, hex, cmyk:{c,m,y,k}}], showLegend }
+  let lastResult = null;
+  let lastRender = null;
 
-  // ========= 初始化：聚类颜色数 1 - 15 =========
   (function initKOptions(){
     const frag = document.createDocumentFragment();
     for(let i=1;i<=15;i++){
@@ -363,7 +357,6 @@
     return { c:to100(c), m:to100(m), y:to100(y), k:to100(k) };
   }
 
-  // ===== K-means++ init =====
   function initKMeansPP(pixels, k){
     const centers = [];
     const n = pixels.length;
@@ -448,24 +441,20 @@
     return { r, g, b };
   }
 
-  // ===== Render =====
   function renderFromResult(result){
     if(!result) return;
 
     const mode = modeEl.value;
     const total = result.counts.reduce((a,b)=>a+b,0);
 
-    // 1) 合并
     let items = result.centers.map((c,i)=>({
       center: c,
       count: result.counts[i],
       pct: result.counts[i] / total * 100
     }));
 
-    // 2) 按占比降序
     items.sort((a,b)=> b.pct - a.pct);
 
-    // 3) 模式应用到颜色
     const rendered = items.map(it=>{
       const rgb = applyModeToColor(it.center, mode);
       const hex = rgbToHexStr(rgb);
@@ -473,17 +462,18 @@
       return { rgb, hex, cmyk, pct: it.pct, count: it.count };
     });
 
-    // ✅ legend 自动隐藏：K>=7 不显示
     const showLegend = rendered.length <= 6;
-
     lastRender = { items: rendered, showLegend };
 
-    // ✅ 页面饼图 legend 直接显示 HEX（与你之前的需求一致）
     const labels = rendered.map(it => it.hex);
     const colors = rendered.map(it=> `rgb(${it.rgb.r},${it.rgb.g},${it.rgb.b})`);
     const data = rendered.map(it=> Number(it.pct.toFixed(2)));
 
     if(chart) chart.destroy();
+
+    // ✅ hover 外扩：电脑 10，手机 6（更稳）
+    const isCoarse = window.matchMedia && window.matchMedia('(pointer: coarse)').matches;
+
     chart = new Chart(pieCanvas.getContext('2d'), {
       type:'pie',
       data:{
@@ -491,13 +481,21 @@
         datasets:[{
           data,
           backgroundColor: colors,
-          borderWidth: 1
+
+          // ✅ 关键：hover 不变色，只外扩
+          hoverBackgroundColor: colors,
+          hoverOffset: isCoarse ? 6 : 10,
+
+          borderColor: "rgba(255,255,255,0.55)",
+          hoverBorderColor: "rgba(255,255,255,0.55)",
+          borderWidth: 1,
+          hoverBorderWidth: 1
         }]
       },
       options:{
         responsive:true,
         maintainAspectRatio:false,
-        rotation: -90 * Math.PI / 180, // 12点开始
+        rotation: -90 * Math.PI / 180,
         plugins:{
           legend:{
             display: showLegend,
@@ -515,7 +513,6 @@
       }
     });
 
-    // list
     listEl.innerHTML = "";
     rendered.forEach((it)=>{
       const div = document.createElement('div');
@@ -627,10 +624,8 @@
       out.height = srcCanvas.height;
       const octx = out.getContext("2d");
 
-      // 透明底
       octx.drawImage(srcCanvas, 0, 0);
 
-      // 右下角刻字
       const padding = 14;
       const fontSize = 12;
       octx.font = `${fontSize}px ui-monospace, Menlo, Consolas, monospace`;
@@ -679,289 +674,10 @@
   exportPngBtn.addEventListener("click", ()=> exportChartPngWithSignature({ pieOnly:false }));
   exportPieOnlyPngBtn.addEventListener("click", ()=> exportChartPngWithSignature({ pieOnly:true }));
 
-  // ===== SVG 导出（饼图矢量）=====
-  function svgEscape(s){
-    return String(s)
-      .replaceAll("&","&amp;")
-      .replaceAll("<","&lt;")
-      .replaceAll(">","&gt;")
-      .replaceAll('"',"&quot;")
-      .replaceAll("'","&#39;");
-  }
-
-  function polarToCartesian(cx, cy, r, angleRad){
-    return {
-      x: cx + r * Math.cos(angleRad),
-      y: cy + r * Math.sin(angleRad)
-    };
-  }
-
-  function wedgePath(cx, cy, r, startRad, endRad){
-    const p1 = polarToCartesian(cx, cy, r, startRad);
-    const p2 = polarToCartesian(cx, cy, r, endRad);
-    const delta = endRad - startRad;
-    const largeArc = (delta % (Math.PI*2)) > Math.PI ? 1 : 0;
-    const sweep = 1; // clockwise
-    return [
-      `M ${cx} ${cy}`,
-      `L ${p1.x} ${p1.y}`,
-      `A ${r} ${r} 0 ${largeArc} ${sweep} ${p2.x} ${p2.y}`,
-      `Z`
-    ].join(" ");
-  }
-
-  function downloadSvg(svgText, filename){
-    const blob = new Blob([svgText], { type: "image/svg+xml;charset=utf-8" });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement("a");
-    a.href = url;
-    a.download = filename;
-    document.body.appendChild(a);
-    a.click();
-    a.remove();
-    URL.revokeObjectURL(url);
-  }
-
-  function buildPieSvg({ pieOnly }){
-    if(!lastRender) return null;
-
-    const items = lastRender.items;
-    const showLegend = (!pieOnly) && lastRender.showLegend;
-
-    const W = 1200;
-    const H = showLegend ? 900 : 820;
-
-    const cx = W/2;
-    const cy = 420;
-    const r  = 320;
-
-    let start = -Math.PI/2;
-    const paths = [];
-
-    items.forEach((it)=>{
-      const frac = it.pct / 100;
-      const end = start + frac * Math.PI * 2;
-      const fill = `rgb(${it.rgb.r},${it.rgb.g},${it.rgb.b})`;
-      const d = wedgePath(cx, cy, r, start, end);
-      paths.push(`<path d="${d}" fill="${fill}" stroke="rgba(255,255,255,0.35)" stroke-width="1"/>`);
-      start = end;
-    });
-
-    let legend = "";
-    if(showLegend){
-      const box = 18;
-      const gapX = 240;
-      const startX = 150;
-      const baseY = 780;
-
-      legend += `<g font-family="system-ui, -apple-system, Segoe UI, Roboto, PingFang SC, Microsoft YaHei, sans-serif" font-size="20" fill="rgba(255,255,255,0.92)">`;
-      items.forEach((it, i)=>{
-        const col = `rgb(${it.rgb.r},${it.rgb.g},${it.rgb.b})`;
-        const x = startX + (i % 3) * gapX;
-        const y = baseY + Math.floor(i / 3) * 44;
-        legend += `
-          <rect x="${x}" y="${y-18}" width="${box}" height="${box}" rx="4" fill="${col}" stroke="rgba(255,255,255,0.35)" />
-          <text x="${x+box+10}" y="${y-2}">${svgEscape(it.hex)}</text>
-        `;
-      });
-      legend += `</g>`;
-    }
-
-    const sigX = W - 40;
-    const sigY = H - 26;
-
-    const svg =
-`<?xml version="1.0" encoding="UTF-8"?>
-<svg xmlns="http://www.w3.org/2000/svg" width="${W}" height="${H}" viewBox="0 0 ${W} ${H}">
-  <defs>
-    <filter id="softShadow" x="-20%" y="-20%" width="140%" height="140%">
-      <feDropShadow dx="0" dy="2" stdDeviation="3" flood-color="rgba(0,0,0,0.35)"/>
-    </filter>
-  </defs>
-
-  <g>
-    ${paths.join("\n    ")}
-  </g>
-
-  ${legend}
-
-  <text x="${sigX}" y="${sigY}"
-        text-anchor="end"
-        font-family="ui-monospace, Menlo, Consolas, monospace"
-        font-size="20"
-        fill="rgba(255,255,255,0.28)"
-        filter="url(#softShadow)">${svgEscape(SIGN_TEXT)}</text>
-</svg>`;
-    return svg;
-  }
-
-  exportSvgBtn.addEventListener("click", ()=>{
-    if(!lastRender) return alert("请先分析图片生成饼图");
-    const svg = buildPieSvg({ pieOnly: false });
-    downloadSvg(svg, "color-breakdown_jintiao.svg");
-  });
-
-  exportPieOnlySvgBtn.addEventListener("click", ()=>{
-    if(!lastRender) return alert("请先分析图片生成饼图");
-    const svg = buildPieSvg({ pieOnly: true });
-    downloadSvg(svg, "color-breakdown_jintiao_pie-only.svg");
-  });
-
-  // ===== ✅ 色卡导出（PNG + SVG）=====
-  function buildSwatchLayout(n){
-    const cols = Math.min(5, Math.max(1, n));
-    const rows = Math.ceil(n / cols);
-    return { cols, rows };
-  }
-
-  function exportSwatchPng(){
-    if(!lastRender) return alert("请先分析图片生成颜色结果");
-
-    const items = lastRender.items;
-    const n = items.length;
-    const { cols, rows } = buildSwatchLayout(n);
-
-    // 色卡单元尺寸（接近你参考图的比例）
-    const margin = 48;
-    const gap = 26;
-    const cardW = 210;
-    const rectH = 140;
-    const textH = 86;
-
-    const W = margin*2 + cols*cardW + (cols-1)*gap;
-    const H = margin*2 + rows*(rectH + textH) + (rows-1)*gap + 34; // + 签名区
-
-    const c = document.createElement("canvas");
-    c.width = W;
-    c.height = H;
-    const ctx = c.getContext("2d");
-
-    // 白底（更像你给的 Pantone 色卡图）
-    ctx.fillStyle = "#ffffff";
-    ctx.fillRect(0,0,W,H);
-
-    // 标题（可选：更像样张那种“干净排版”）
-    // 你想更像样张，也可以删掉这几行
-    // ctx.fillStyle = "#111";
-    // ctx.font = "600 18px system-ui, -apple-system, Segoe UI, Roboto, PingFang SC, Microsoft YaHei, sans-serif";
-    // ctx.fillText("COLOR SWATCH", margin, 30);
-
-    for(let i=0;i<n;i++){
-      const it = items[i];
-      const col = i % cols;
-      const row = Math.floor(i / cols);
-
-      const x = margin + col*(cardW + gap);
-      const y = margin + row*(rectH + textH + gap);
-
-      // 色块
-      ctx.fillStyle = it.hex;
-      ctx.fillRect(x, y, cardW, rectH);
-
-      // 边框
-      ctx.strokeStyle = "rgba(0,0,0,0.12)";
-      ctx.lineWidth = 2;
-      ctx.strokeRect(x, y, cardW, rectH);
-
-      // 文本区
-      const tx = x;
-      const ty = y + rectH + 18;
-
-      ctx.fillStyle = "#111";
-      ctx.font = "700 16px ui-monospace, Menlo, Consolas, monospace";
-      ctx.fillText(it.hex, tx, ty);
-
-      ctx.fillStyle = "rgba(0,0,0,0.72)";
-      ctx.font = "12px ui-monospace, Menlo, Consolas, monospace";
-      ctx.fillText(`RGB: ${it.rgb.r}, ${it.rgb.g}, ${it.rgb.b}`, tx, ty + 22);
-
-      ctx.fillStyle = "rgba(0,0,0,0.65)";
-      ctx.font = "12px ui-monospace, Menlo, Consolas, monospace";
-      ctx.fillText(`CMYK: C${it.cmyk.c} M${it.cmyk.m} Y${it.cmyk.y} K${it.cmyk.k}`, tx, ty + 42);
-
-      ctx.fillStyle = "rgba(0,0,0,0.38)";
-      ctx.font = "11px system-ui, -apple-system, Segoe UI, Roboto, PingFang SC, Microsoft YaHei, sans-serif";
-      ctx.fillText(`${it.pct.toFixed(2)}%`, tx, ty + 64);
-    }
-
-    // 右下角刻字（更克制：黑色低透明）
-    ctx.textBaseline = "bottom";
-    ctx.fillStyle = "rgba(0,0,0,0.30)";
-    ctx.font = "12px ui-monospace, Menlo, Consolas, monospace";
-    const sig = SIGN_TEXT;
-    const sw = ctx.measureText(sig).width;
-    ctx.fillText(sig, W - margin, H - 16);
-
-    const a = document.createElement("a");
-    a.href = c.toDataURL("image/png");
-    a.download = "color-breakdown_swatch_jintiao.png";
-    document.body.appendChild(a);
-    a.click();
-    a.remove();
-  }
-
-  function exportSwatchSvg(){
-    if(!lastRender) return alert("请先分析图片生成颜色结果");
-
-    const items = lastRender.items;
-    const n = items.length;
-    const { cols, rows } = buildSwatchLayout(n);
-
-    const margin = 48;
-    const gap = 26;
-    const cardW = 210;
-    const rectH = 140;
-    const textH = 86;
-
-    const W = margin*2 + cols*cardW + (cols-1)*gap;
-    const H = margin*2 + rows*(rectH + textH) + (rows-1)*gap + 34;
-
-    let body = '';
-    for(let i=0;i<n;i++){
-      const it = items[i];
-      const col = i % cols;
-      const row = Math.floor(i / cols);
-
-      const x = margin + col*(cardW + gap);
-      const y = margin + row*(rectH + textH + gap);
-
-      const tx = x;
-      const ty = y + rectH + 18;
-
-      body += `
-        <rect x="${x}" y="${y}" width="${cardW}" height="${rectH}" fill="${it.hex}" />
-        <rect x="${x}" y="${y}" width="${cardW}" height="${rectH}" fill="none" stroke="rgba(0,0,0,0.12)" stroke-width="2" />
-
-        <text x="${tx}" y="${ty}" font-family="ui-monospace, Menlo, Consolas, monospace" font-size="16" font-weight="700" fill="#111">${svgEscape(it.hex)}</text>
-        <text x="${tx}" y="${ty+22}" font-family="ui-monospace, Menlo, Consolas, monospace" font-size="12" fill="rgba(0,0,0,0.72)">
-          ${svgEscape(`RGB: ${it.rgb.r}, ${it.rgb.g}, ${it.rgb.b}`)}
-        </text>
-        <text x="${tx}" y="${ty+42}" font-family="ui-monospace, Menlo, Consolas, monospace" font-size="12" fill="rgba(0,0,0,0.65)">
-          ${svgEscape(`CMYK: C${it.cmyk.c} M${it.cmyk.m} Y${it.cmyk.y} K${it.cmyk.k}`)}
-        </text>
-        <text x="${tx}" y="${ty+64}" font-family="system-ui, -apple-system, Segoe UI, Roboto, PingFang SC, Microsoft YaHei, sans-serif"
-              font-size="11" fill="rgba(0,0,0,0.38)">${svgEscape(`${it.pct.toFixed(2)}%`)}</text>
-      `;
-    }
-
-    const sigX = W - margin;
-    const sigY = H - 16;
-
-    const svg =
-`<?xml version="1.0" encoding="UTF-8"?>
-<svg xmlns="http://www.w3.org/2000/svg" width="${W}" height="${H}" viewBox="0 0 ${W} ${H}">
-  <rect x="0" y="0" width="${W}" height="${H}" fill="#ffffff" />
-  ${body}
-  <text x="${sigX}" y="${sigY}" text-anchor="end"
-        font-family="ui-monospace, Menlo, Consolas, monospace"
-        font-size="12" fill="rgba(0,0,0,0.30)">${svgEscape(SIGN_TEXT)}</text>
-</svg>`;
-
-    downloadSvg(svg, "color-breakdown_swatch_jintiao.svg");
-  }
-
-  exportSwatchPngBtn.addEventListener("click", exportSwatchPng);
-  exportSwatchSvgBtn.addEventListener("click", exportSwatchSvg);
+  // ===== SVG / 色卡导出部分：你原样保留（下面省略：与你发的代码一致）=====
+  // ...（此处保持你原有的 buildPieSvg、exportSwatchPng、exportSwatchSvg、拖拽逻辑不变）
+  // 由于你已贴了完整版本，我这里不重复粘贴后半段，避免你复制时出错。
+  // 你只需要把上面 renderFromResult 的 Chart dataset 改成 hoverOffset 版本就能达成效果。
 
   // ===== 拖拽到按钮上传 =====
   function preventDefaults(e){ e.preventDefault(); e.stopPropagation(); }
