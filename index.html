@@ -298,6 +298,7 @@
 </div>
 
 <script>
+  let PANTONE_DB = null;
   const fileEl = document.getElementById('file');
   const uploadBtn = document.getElementById('uploadBtn');
   const kEl = document.getElementById('k');
@@ -326,6 +327,16 @@
 
   let lastResult = null;   // 普通分析结果
   let lastRender = null;   // 最终渲染/导出数据（分析或吸色）
+
+  fetch('./pantone-numbers.json')
+  .then(res => res.json())
+  .then(data => {
+    PANTONE_DB = data;
+    console.log('Pantone 数据加载成功', data.length);
+  })
+  .catch(err => {
+    console.warn('Pantone 数据加载失败', err);
+  });
 
   // ========= 初始化：聚类颜色数 1 - 15 =========
   (function initKOptions(){
