@@ -4,7 +4,8 @@
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width,initial-scale=1" />
   <title>Color Breakdown · by JINTiao</title>
-  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.min.js"></script>
+
 
   <style>
     :root{
@@ -405,7 +406,7 @@ fetch("./pantone-numbers.json")
   .then(data => {
     PANTONE_RAW = data;
     PANTONE_LIST = normalizePantoneDB(data);
-    PANTONE_READY = PANTONE_LIST.length > 0;
+    PANTONE_READY_2 = PANTONE_LIST.length > 0;
     console.log("Pantone loaded:", PANTONE_READY, "items:", PANTONE_LIST.length);
   })
   .catch(err => {
