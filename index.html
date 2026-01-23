@@ -166,7 +166,6 @@
     }
     .preview.empty{ min-height:320px; }
 
-    /* 固定图表区域高度，避免被 legend 挤压 */
     .chart-wrap{
       height: 420px;
       width: 100%;
@@ -254,6 +253,16 @@
         </select>
       </div>
 
+      <!-- ✅ 新增：吸色合并强度 -->
+      <div class="pill">
+        <span class="small muted">吸色合并</span>
+        <select id="mergeStrength">
+          <option value="8">低（ΔE 8，更细）</option>
+          <option value="12" selected>中（ΔE 12，推荐）</option>
+          <option value="16">高（ΔE 16，更聚合）</option>
+        </select>
+      </div>
+
       <button id="run" class="btn btn-primary disabled" type="button">开始分析</button>
       <button id="pick" class="btn btn-primary disabled" type="button">开始吸色</button>
 
@@ -294,6 +303,7 @@
   const kEl = document.getElementById('k');
   const stepEl = document.getElementById('step');
   const modeEl = document.getElementById('mode');
+  const mergeStrengthEl = document.getElementById('mergeStrength'); // ✅ 新增
   const runEl = document.getElementById('run');
   const pickEl = document.getElementById('pick');
   const statusEl = document.getElementById('status');
@@ -306,7 +316,6 @@
   const exportPieOnlyPngBtn = document.getElementById('exportPieOnlyPng');
   const exportSvgBtn = document.getElementById('exportSvg');
   const exportPieOnlySvgBtn = document.getElementById('exportPieOnlySvg');
-
   const exportSwatchPngBtn = document.getElementById('exportSwatchPng');
   const exportSwatchSvgBtn = document.getElementById('exportSwatchSvg');
 
@@ -315,12 +324,8 @@
   let currentImage = null;
   let chart = null;
 
-  // 最近一次聚类结果（普通分析）
-  let lastResult = null;  // { centers, counts }
-
-  // 最近一次用于导出/渲染的数据（无论“分析”还是“吸色”最终都会落到这里）
-  // { items: [{rgb:{r,g,b}, pct, count, hex, cmyk:{c,m,y,k}}], showLegend }
-  let lastRender = null;
+  let lastResult = null;   // 普通分析结果
+  let lastRender = null;   // 最终渲染/导出数据（分析或吸色）
 
   // ========= 初始化：聚类颜色数 1 - 15 =========
   (function initKOptions(){
@@ -377,34 +382,24 @@
     const r = srgbToLinear(rgb.r);
     const g = srgbToLinear(rgb.g);
     const b = srgbToLinear(rgb.b);
-
-    // D65
     const x = r*0.4124564 + g*0.3575761 + b*0.1804375;
     const y = r*0.2126729 + g*0.7151522 + b*0.0721750;
     const z = r*0.0193339 + g*0.1191920 + b*0.9503041;
-
     return { x, y, z };
   }
   function xyzToLab(xyz){
-    // D65 reference white
     const Xn = 0.95047, Yn = 1.00000, Zn = 1.08883;
     let x = xyz.x / Xn;
     let y = xyz.y / Yn;
     let z = xyz.z / Zn;
-
     const f = (t)=> (t > 0.008856) ? Math.cbrt(t) : (7.787*t + 16/116);
-
     const fx = f(x), fy = f(y), fz = f(z);
-
     const L = 116*fy - 16;
     const a = 500*(fx - fy);
     const b = 200*(fy - fz);
-
     return { L, a, b };
   }
-  function rgbToLab(rgb){
-    return xyzToLab(rgbToXyz(rgb));
-  }
+  function rgbToLab(rgb){ return xyzToLab(rgbToXyz(rgb)); }
   function deltaE76(l1, l2){
     const dL = l1.L - l2.L;
     const da = l1.a - l2.a;
@@ -451,7 +446,6 @@
 
     for(let iter=0; iter<maxIter; iter++){
       let changed = 0;
-
       for(let i=0;i<n;i++){
         let best=0, bestD=Infinity;
         const p = pixels[i];
@@ -476,13 +470,11 @@
         moved += dist2(newC, centers[c]);
         centers[c] = newC;
       }
-
       if(changed===0 || moved < 1e-2) break;
     }
 
     const counts = Array.from({length:k}, ()=>0);
     for(const lab of labels) counts[lab]++;
-
     return { centers, counts };
   }
 
@@ -514,13 +506,11 @@
     });
   }
 
-  // ===== “相近合并”：用 Lab ΔE，把接近的颜色合并成更少的代表色 =====
+  // ===== “相近合并”：用 Lab ΔE，把接近的颜色合并 =====
   function mergeSimilarByDeltaE(items, thresholdDE = 12){
-    // items: [{rgb, pct, count, hex, cmyk}]
-    // 先按占比从大到小（让“大色”吸附“小色”）
     const sorted = items.slice().sort((a,b)=> b.pct - a.pct);
 
-    const groups = []; // each: { sumR,sumG,sumB,sumCount, sumPct, members:[...], lab }
+    const groups = [];
     for(const it of sorted){
       const lab = rgbToLab(it.rgb);
 
@@ -537,13 +527,11 @@
 
       if(bestIdx !== -1 && bestDE <= thresholdDE){
         const g = groups[bestIdx];
-        // 加权合并：按 count（像素数）权重
         g.sumR += it.rgb.r * it.count;
         g.sumG += it.rgb.g * it.count;
         g.sumB += it.rgb.b * it.count;
         g.sumCount += it.count;
         g.sumPct += it.pct;
-        g.members.push(it);
 
         const rgb = {
           r: g.sumR / g.sumCount,
@@ -558,13 +546,11 @@
           sumB: it.rgb.b * it.count,
           sumCount: it.count,
           sumPct: it.pct,
-          members: [it],
           lab
         });
       }
     }
 
-    // 输出合并后的 items
     const merged = groups.map(g=>{
       const rgb = {
         r: Math.round(g.sumR / g.sumCount),
@@ -573,20 +559,12 @@
       };
       const hex = rgbToHexStr(rgb);
       const cmyk = rgbToCmyk(rgb);
-      return {
-        rgb, hex, cmyk,
-        pct: g.sumPct,
-        count: g.sumCount
-      };
+      return { rgb, hex, cmyk, pct: g.sumPct, count: g.sumCount };
     });
 
-    // 再按占比降序
     merged.sort((a,b)=> b.pct - a.pct);
-
-    // pct 可能因为浮点累加导致 99.99/100.01，做一次归一
     const sumPct = merged.reduce((s,x)=>s+x.pct,0) || 1;
     for(const m of merged) m.pct = (m.pct / sumPct) * 100;
-
     return merged;
   }
 
@@ -606,23 +584,23 @@
       type:'pie',
       data:{
         labels,
-       datasets:[{
-  data,
-  backgroundColor: colors,
-  borderWidth: 1,
-  borderColor: "rgba(255,255,255,0.35)",
+        datasets:[{
+          data,
+          backgroundColor: colors,
+          borderWidth: 1,
+          borderColor: "rgba(255,255,255,0.35)",
 
-  // ✅ hover 只“微微外扩”，不变色
-  hoverOffset: 8,
-  hoverBackgroundColor: colors,      // 关键：hover 仍然用原色
-  hoverBorderColor: "rgba(255,255,255,0.35)",
-  hoverBorderWidth: 1
-}]
+          // ✅ hover 只外扩，不变色
+          hoverOffset: 8,
+          hoverBackgroundColor: colors,
+          hoverBorderColor: "rgba(255,255,255,0.35)",
+          hoverBorderWidth: 1
+        }]
       },
       options:{
         responsive:true,
         maintainAspectRatio:false,
-        rotation: -90 * Math.PI / 180, // 12点开始
+        rotation: -90 * Math.PI / 180,
         plugins:{
           legend:{
             display: showLegend,
@@ -663,7 +641,6 @@
     });
   }
 
-  // 普通“分析”：直接用当前 k
   function renderFromResult(result){
     const mode = modeEl.value;
     const rendered = makeRenderedItemsFromKMeans(result, mode);
@@ -675,7 +652,6 @@
       renderFromResult(lastResult);
       setStatus(`模式切换：已更新显示（${modeEl.value === 'mono' ? '灰阶' : '彩色'}）`);
     } else if(lastRender){
-      // 如果只有吸色结果（lastRender），切换模式需要重新跑一次吸色更合理
       setStatus(`已切换模式：请重新点击“开始分析/开始吸色”以按新模式计算`);
     }
   });
@@ -703,7 +679,6 @@
 
   function getSampledPixelsFromImage(){
     const step = parseInt(stepEl.value, 10);
-
     const c = document.createElement('canvas');
     const ctx = c.getContext('2d', { willReadFrequently:true });
 
@@ -735,14 +710,12 @@
       alert("请先录入一张图片（点击“录入”或拖拽到按钮上）");
       return;
     }
-
     const k = parseInt(kEl.value, 10);
 
     setStatus("分析中…");
     showExports(false);
 
     const { pixels, step } = getSampledPixelsFromImage();
-
     if(pixels.length < k){
       setStatus("样本不足，无法聚类。");
       alert("样本点太少，无法完成聚类。请降低抽样步长或换更大的图。");
@@ -758,18 +731,18 @@
     }, 20);
   }
 
-  // “吸色”：固定先跑 15 色，再相近合并（不丢弃小色）
+  // ✅ 吸色：固定 15 色 → 读取强度 → ΔE 合并
   function pickColors(){
     if(!currentImage){
       alert("请先录入一张图片（点击“录入”或拖拽到按钮上）");
       return;
     }
 
-    const K_PICK = 15;      // ✅ 你要求：先解析 15 色
-    const DE_TH = 12;       // ✅ 合并阈值（中等，布料/照片很稳）
+    const K_PICK = 15;
     const mode = modeEl.value;
+    const DE_TH = parseInt(mergeStrengthEl.value, 10) || 12;  // ✅ 新增：读取强度
 
-    setStatus("吸色中…（15色 → 相近合并）");
+    setStatus(`吸色中…（15色 → 相近合并：ΔE≤${DE_TH}）`);
     showExports(false);
 
     const { pixels, step } = getSampledPixelsFromImage();
@@ -781,13 +754,10 @@
 
     setTimeout(()=>{
       const raw = kmeansRGB(pixels, K_PICK, 35);
-      // 先把 15 色做成 rendered（带 pct/count）
       const rendered15 = makeRenderedItemsFromKMeans(raw, mode);
-      // 再相近合并（不筛掉小色）
       const merged = mergeSimilarByDeltaE(rendered15, DE_TH);
 
-      // 吸色结果也直接渲染到饼图+列表，并用于导出
-      lastResult = null; // 吸色结果不走 lastResult
+      lastResult = null;
       renderFromRenderedItems(merged);
 
       setStatus(`吸色完成：15色 → 合并后 ${merged.length} 色（ΔE≤${DE_TH}，抽样步长 ${step}，样本 ${pixels.length}）`);
@@ -873,10 +843,7 @@
   }
 
   function polarToCartesian(cx, cy, r, angleRad){
-    return {
-      x: cx + r * Math.cos(angleRad),
-      y: cy + r * Math.sin(angleRad)
-    };
+    return { x: cx + r * Math.cos(angleRad), y: cy + r * Math.sin(angleRad) };
   }
 
   function wedgePath(cx, cy, r, startRad, endRad){
@@ -884,13 +851,8 @@
     const p2 = polarToCartesian(cx, cy, r, endRad);
     const delta = endRad - startRad;
     const largeArc = (delta % (Math.PI*2)) > Math.PI ? 1 : 0;
-    const sweep = 1; // clockwise
-    return [
-      `M ${cx} ${cy}`,
-      `L ${p1.x} ${p1.y}`,
-      `A ${r} ${r} 0 ${largeArc} ${sweep} ${p2.x} ${p2.y}`,
-      `Z`
-    ].join(" ");
+    const sweep = 1;
+    return [`M ${cx} ${cy}`, `L ${p1.x} ${p1.y}`, `A ${r} ${r} 0 ${largeArc} ${sweep} ${p2.x} ${p2.y}`, `Z`].join(" ");
   }
 
   function downloadSvg(svgText, filename){
@@ -953,41 +915,29 @@
     const sigX = W - 40;
     const sigY = H - 26;
 
-    const svg =
-`<?xml version="1.0" encoding="UTF-8"?>
+    return `<?xml version="1.0" encoding="UTF-8"?>
 <svg xmlns="http://www.w3.org/2000/svg" width="${W}" height="${H}" viewBox="0 0 ${W} ${H}">
   <defs>
     <filter id="softShadow" x="-20%" y="-20%" width="140%" height="140%">
       <feDropShadow dx="0" dy="2" stdDeviation="3" flood-color="rgba(0,0,0,0.35)"/>
     </filter>
   </defs>
-
-  <g>
-    ${paths.join("\n    ")}
-  </g>
-
+  <g>${paths.join("\n")}</g>
   ${legend}
-
-  <text x="${sigX}" y="${sigY}"
-        text-anchor="end"
+  <text x="${sigX}" y="${sigY}" text-anchor="end"
         font-family="ui-monospace, Menlo, Consolas, monospace"
-        font-size="20"
-        fill="rgba(255,255,255,0.28)"
+        font-size="20" fill="rgba(255,255,255,0.28)"
         filter="url(#softShadow)">${svgEscape(SIGN_TEXT)}</text>
 </svg>`;
-    return svg;
   }
 
   exportSvgBtn.addEventListener("click", ()=>{
     if(!lastRender) return alert("请先分析/吸色生成饼图");
-    const svg = buildPieSvg({ pieOnly: false });
-    downloadSvg(svg, "color-breakdown_jintiao.svg");
+    downloadSvg(buildPieSvg({ pieOnly:false }), "color-breakdown_jintiao.svg");
   });
-
   exportPieOnlySvgBtn.addEventListener("click", ()=>{
     if(!lastRender) return alert("请先分析/吸色生成饼图");
-    const svg = buildPieSvg({ pieOnly: true });
-    downloadSvg(svg, "color-breakdown_jintiao_pie-only.svg");
+    downloadSvg(buildPieSvg({ pieOnly:true }), "color-breakdown_jintiao_pie-only.svg");
   });
 
   // ===== 色卡导出（PNG + SVG）=====
@@ -999,7 +949,6 @@
 
   function exportSwatchPng(){
     if(!lastRender) return alert("请先分析/吸色得到颜色结果");
-
     const items = lastRender.items;
     const n = items.length;
     const { cols, rows } = buildSwatchLayout(n);
@@ -1014,8 +963,7 @@
     const H = margin*2 + rows*(rectH + textH) + (rows-1)*gap + 34;
 
     const c = document.createElement("canvas");
-    c.width = W;
-    c.height = H;
+    c.width = W; c.height = H;
     const ctx = c.getContext("2d");
 
     ctx.fillStyle = "#ffffff";
@@ -1071,7 +1019,6 @@
 
   function exportSwatchSvg(){
     if(!lastRender) return alert("请先分析/吸色得到颜色结果");
-
     const items = lastRender.items;
     const n = items.length;
     const { cols, rows } = buildSwatchLayout(n);
@@ -1093,40 +1040,30 @@
 
       const x = margin + col*(cardW + gap);
       const y = margin + row*(rectH + textH + gap);
-
       const tx = x;
       const ty = y + rectH + 18;
 
       body += `
         <rect x="${x}" y="${y}" width="${cardW}" height="${rectH}" fill="${it.hex}" />
         <rect x="${x}" y="${y}" width="${cardW}" height="${rectH}" fill="none" stroke="rgba(0,0,0,0.12)" stroke-width="2" />
-
         <text x="${tx}" y="${ty}" font-family="ui-monospace, Menlo, Consolas, monospace" font-size="16" font-weight="700" fill="#111">${svgEscape(it.hex)}</text>
-        <text x="${tx}" y="${ty+22}" font-family="ui-monospace, Menlo, Consolas, monospace" font-size="12" fill="rgba(0,0,0,0.72)">
-          ${svgEscape(`RGB: ${it.rgb.r}, ${it.rgb.g}, ${it.rgb.b}`)}
-        </text>
-        <text x="${tx}" y="${ty+42}" font-family="ui-monospace, Menlo, Consolas, monospace" font-size="12" fill="rgba(0,0,0,0.65)">
-          ${svgEscape(`CMYK: C${it.cmyk.c} M${it.cmyk.m} Y${it.cmyk.y} K${it.cmyk.k}`)}
-        </text>
-        <text x="${tx}" y="${ty+64}" font-family="system-ui, -apple-system, Segoe UI, Roboto, PingFang SC, Microsoft YaHei, sans-serif"
-              font-size="11" fill="rgba(0,0,0,0.38)">${svgEscape(`${it.pct.toFixed(2)}%`)}</text>
+        <text x="${tx}" y="${ty+22}" font-family="ui-monospace, Menlo, Consolas, monospace" font-size="12" fill="rgba(0,0,0,0.72)">${svgEscape(`RGB: ${it.rgb.r}, ${it.rgb.g}, ${it.rgb.b}`)}</text>
+        <text x="${tx}" y="${ty+42}" font-family="ui-monospace, Menlo, Consolas, monospace" font-size="12" fill="rgba(0,0,0,0.65)">${svgEscape(`CMYK: C${it.cmyk.c} M${it.cmyk.m} Y${it.cmyk.y} K${it.cmyk.k}`)}</text>
+        <text x="${tx}" y="${ty+64}" font-family="system-ui, -apple-system, Segoe UI, Roboto, PingFang SC, Microsoft YaHei, sans-serif" font-size="11" fill="rgba(0,0,0,0.38)">${svgEscape(`${it.pct.toFixed(2)}%`)}</text>
       `;
     }
 
     const sigX = W - margin;
     const sigY = H - 16;
 
-    const svg =
-`<?xml version="1.0" encoding="UTF-8"?>
+    downloadSvg(`<?xml version="1.0" encoding="UTF-8"?>
 <svg xmlns="http://www.w3.org/2000/svg" width="${W}" height="${H}" viewBox="0 0 ${W} ${H}">
   <rect x="0" y="0" width="${W}" height="${H}" fill="#ffffff" />
   ${body}
   <text x="${sigX}" y="${sigY}" text-anchor="end"
         font-family="ui-monospace, Menlo, Consolas, monospace"
         font-size="12" fill="rgba(0,0,0,0.30)">${svgEscape(SIGN_TEXT)}</text>
-</svg>`;
-
-    downloadSvg(svg, "color-breakdown_swatch_jintiao.svg");
+</svg>`, "color-breakdown_swatch_jintiao.svg");
   }
 
   exportSwatchPngBtn.addEventListener("click", exportSwatchPng);
