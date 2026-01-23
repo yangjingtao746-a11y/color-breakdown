@@ -298,7 +298,6 @@
 </div>
 
 <script>
-  let PANTONE_DB = null;
   const fileEl = document.getElementById('file');
   const uploadBtn = document.getElementById('uploadBtn');
   const kEl = document.getElementById('k');
@@ -327,36 +326,6 @@
 
   let lastResult = null;   // 普通分析结果
   let lastRender = null;   // 最终渲染/导出数据（分析或吸色）
-
- let PANTONE_DB = null;
-let PANTONE_LIST = []; // ✅ 规范化后的数组：[{name, lab:{L,a,b}}...]
-
-console.log("准备加载 Pantone JSON…");
-
-fetch("./pantone-numbers.json")
-  .then(res => {
-    console.log("Pantone 请求状态：", res.status, res.statusText);
-    if (!res.ok) throw new Error("HTTP " + res.status);
-    return res.json();
-  })
-  .then(data => {
-    PANTONE_DB = data;
-
-    // ✅ 打印结构：你就能知道它到底是数组还是对象
-    const isArr = Array.isArray(data);
-    console.log("Pantone 数据类型：", isArr ? "Array" : typeof data);
-    console.log("Pantone 示例：", isArr ? data.slice(0, 3) : Object.keys(data).slice(0, 3));
-
-    // ✅ 关键：把各种可能结构都“规范化”为 PANTONE_LIST
-    PANTONE_LIST = normalizePantoneDB(data);
-
-    console.log("Pantone 规范化完成，条数：", PANTONE_LIST.length);
-    console.log("Pantone 规范化示例：", PANTONE_LIST.slice(0, 3));
-  })
-  .catch(err => {
-    console.warn("Pantone 数据加载失败：", err);
-  });
-
 
   // ========= 初始化：聚类颜色数 1 - 15 =========
   (function initKOptions(){
@@ -437,61 +406,6 @@ fetch("./pantone-numbers.json")
     const db = l1.b - l2.b;
     return Math.sqrt(dL*dL + da*da + db*db);
   }
-function normalizePantoneDB(db) {
-  // 目标输出：[{ name: "PANTONE 123 C", lab:{L,a,b} }, ...]
-  const out = [];
-
-  const toLab = (obj) => {
-    // 支持多种字段名：lab / Lab / LAB / l,a,b / L,a,b
-    const lab = obj.lab || obj.Lab || obj.LAB || obj;
-    const L = lab.L ?? lab.l ?? lab[0];
-    const a = lab.a ?? lab.A ?? lab[1];
-    const b = lab.b ?? lab.B ?? lab[2];
-    if ([L,a,b].some(v => v === undefined || v === null || Number.isNaN(Number(v)))) return null;
-    return { L: Number(L), a: Number(a), b: Number(b) };
-  };
-function findNearestPantoneByLab(targetLab) {
-  // 还没加载完成就直接返回空
-  if (!PANTONE_LIST || PANTONE_LIST.length === 0) return null;
-
-  let best = null;
-  let bestDE = Infinity;
-
-  for (const p of PANTONE_LIST) {
-    const de = deltaE76(targetLab, p.lab);
-    if (de < bestDE) {
-      bestDE = de;
-      best = p;
-    }
-  }
-
-  return best ? { name: best.name, de: bestDE } : null;
-}
-
-  if (Array.isArray(db)) {
-    // 情况1：数组，每条可能是 {name, lab:{...}} 或 {pantone, L,a,b} 等
-    for (const item of db) {
-      const name = item.name || item.pantone || item.number || item.code || item.id;
-      const lab = toLab(item.lab ? {lab:item.lab} : item);
-      if (!name || !lab) continue;
-      out.push({ name: String(name), lab });
-    }
-    return out;
-  }
-
-  if (db && typeof db === "object") {
-    // 情况2：对象：{ "PANTONE 123 C": {lab:{...}}, ... } 或 { "123C": [L,a,b], ... }
-    for (const [key, val] of Object.entries(db)) {
-      const name = (val && (val.name || val.pantone)) ? (val.name || val.pantone) : key;
-      const lab = toLab(val);
-      if (!name || !lab) continue;
-      out.push({ name: String(name), lab });
-    }
-    return out;
-  }
-
-  return out;
-}
 
   // ===== K-means++ init =====
   function initKMeansPP(pixels, k){
@@ -709,20 +623,13 @@ function findNearestPantoneByLab(targetLab) {
     rendered.forEach((it)=>{
       const div = document.createElement('div');
       div.className = 'item';
-      const lab = rgbToLab(it.rgb);
-const ptn = findNearestPantoneByLab(lab);
-
       div.innerHTML = `
         <div style="display:flex;align-items:center;gap:10px;">
           <div class="swatch" style="background:${it.hex}"></div>
           <div>
             <div class="mono">${it.hex}</div>
             <div class="small muted">RGB(${it.rgb.r}, ${it.rgb.g}, ${it.rgb.b})</div>
-      <div class="small muted">CMYK(${it.cmyk.c}, ${it.cmyk.m}, ${it.cmyk.y}, ${it.cmyk.k}) (approx.)</div>
-<div class="small muted">
-  Pantone: ${ptn ? `${ptn.name} (ΔE ${ptn.de.toFixed(1)})` : '未加载/无数据'}
-</div>
-
+            <div class="small muted">CMYK(${it.cmyk.c}, ${it.cmyk.m}, ${it.cmyk.y}, ${it.cmyk.k}) (approx.)</div>
           </div>
         </div>
         <div style="text-align:right;">
