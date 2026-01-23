@@ -299,41 +299,52 @@
 
 <script>
   // ===== Pantone 数据加载（放在最上面）=====
-  let PANTONE_RAW = null;
-  let PANTONE_READY = false;
+ let PANTONE_RAW = null;
+let PANTONE_LIST = [];
+let PANTONE_READY = false;
 
-  fetch("./pantone-numbers.json")
-    .then(r => {
-      if (!r.ok) throw new Error("Pantone JSON not found");
-      return r.json();
-    })
-   .then(data => {
-  PANTONE_RAW = data;
-  PANTONE_LIST = normalizePantoneDB(data);
-  PANTONE_READY = PANTONE_LIST.length > 0;
-  console.log("Pantone normalized:", PANTONE_LIST.length);
-})
-
-    .catch(err => {
-      PANTONE_READY = false;
-      console.warn("⚠️ Pantone load failed:", err);
-    });let PANTONE_LIST = [];
+fetch('./pantone-numbers.json')
+  .then(r => r.json())
+  .then(data => {
+    PANTONE_RAW = data;
+    PANTONE_LIST = normalizePantoneDB(data);
+    PANTONE_READY = PANTONE_LIST.length > 0;
+    console.log("Pantone normalized:", PANTONE_LIST.length);
+    console.log("Pantone sample:", PANTONE_LIST[0]);
+  })
+  .catch(err => {
+    PANTONE_READY = false;
+    console.warn("Pantone load failed:", err);
+  });
+let PANTONE_LIST = [];
 
 function normalizePantoneDB(raw){
   const list = [];
-  for(const name in raw){
-    const rgb = raw[name];
-    if(rgb && typeof rgb.r === "number"){
-      const lab = rgbToLab(rgb);
-      list.push({
-        name,
-        rgb,
-        lab
-      });
-    }
+  if(!raw || typeof raw !== "object") return list;
+
+  for(const code of Object.keys(raw)){
+    const v = raw[code];
+    if(!v) continue;
+
+    // 你的数据：{name:'egret', hex:'f3ece0'}
+    const hex = v.hex || v.HEX || v.value;
+    const name = v.name || v.label || "";
+
+    const rgb = hexToRgb(hex);
+    if(!rgb) continue;
+
+    const lab = rgbToLab(rgb); // 你代码里已有 rgbToLab
+    list.push({
+      code,          // 11-0103 这种
+      name,          // egret
+      hex: ("#" + String(hex).replace(/^#/, "")).toUpperCase(),
+      rgb,
+      lab
+    });
   }
   return list;
 }
+
 
 // 在 fetch 成功后，补一行
 // 👉 注意：是加在 .then(data => { ... }) 里面
@@ -399,6 +410,17 @@ function normalizePantoneDB(raw){
     const to2 = (n)=> Math.max(0, Math.min(255, Math.round(n))).toString(16).padStart(2,'0');
     return ("#" + to2(rgb.r) + to2(rgb.g) + to2(rgb.b)).toUpperCase();
   }
+  
+  function hexToRgb(hex){
+  if(!hex) return null;
+  hex = String(hex).trim().replace(/^#/, "");
+  if(hex.length === 3) hex = hex.split("").map(c=>c+c).join("");
+  if(hex.length !== 6) return null;
+
+  const n = parseInt(hex, 16);
+  return { r:(n>>16)&255, g:(n>>8)&255, b:n&255 };
+}
+
 
   function rgbToCmyk(rgb){
     let r = rgb.r/255, g = rgb.g/255, b = rgb.b/255;
