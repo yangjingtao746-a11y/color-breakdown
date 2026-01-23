@@ -4,7 +4,21 @@
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width,initial-scale=1" />
   <title>Color Breakdown · by JINTiao</title>
-  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+
+  <!-- Chart.js：主 CDN + 备用 CDN（避免你之前遇到 ERR_CONNECTION_CLOSED） -->
+  <script>
+    // 如果主 CDN 失败，就自动加载备用
+    (function loadChartJs(){
+      const s = document.createElement('script');
+      s.src = "https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js";
+      s.onerror = () => {
+        const s2 = document.createElement('script');
+        s2.src = "https://unpkg.com/chart.js@4.4.1/dist/chart.umd.min.js";
+        document.head.appendChild(s2);
+      };
+      document.head.appendChild(s);
+    })();
+  </script>
 
   <style>
     :root{
@@ -253,7 +267,6 @@
         </select>
       </div>
 
-      <!-- ✅ 新增：吸色合并强度 -->
       <div class="pill">
         <span class="small muted">吸色合并</span>
         <select id="mergeStrength">
@@ -298,63 +311,23 @@
 </div>
 
 <script>
-  // ===== Pantone 数据加载（放在最上面）=====
- let PANTONE_RAW = null;
-let PANTONE_LIST = [];
-let PANTONE_READY = false;
+  // =========================
+  // ✅ Pantone 全局变量（只声明一次！）
+  // =========================
+  let PANTONE_RAW = null;
+  let PANTONE_LIST = [];     // 归一化后的数组：[{code,name,hex,rgb,lab}]
+  let PANTONE_READY = false; // 是否可用
+  const PANTONE_MATCH_CACHE = new Map(); // key: "#RRGGBB" -> match
 
-fetch('./pantone-numbers.json')
-  .then(r => r.json())
-  .then(data => {
-    PANTONE_RAW = data;
-    PANTONE_LIST = normalizePantoneDB(data);
-    PANTONE_READY = PANTONE_LIST.length > 0;
-    console.log("Pantone normalized:", PANTONE_LIST.length);
-    console.log("Pantone sample:", PANTONE_LIST[0]);
-  })
-  .catch(err => {
-    PANTONE_READY = false;
-    console.warn("Pantone load failed:", err);
-  });
-let PANTONE_LIST = [];
-
-function normalizePantoneDB(raw){
-  const list = [];
-  if(!raw || typeof raw !== "object") return list;
-
-  for(const code of Object.keys(raw)){
-    const v = raw[code];
-    if(!v) continue;
-
-    // 你的数据：{name:'egret', hex:'f3ece0'}
-    const hex = v.hex || v.HEX || v.value;
-    const name = v.name || v.label || "";
-
-    const rgb = hexToRgb(hex);
-    if(!rgb) continue;
-
-    const lab = rgbToLab(rgb); // 你代码里已有 rgbToLab
-    list.push({
-      code,          // 11-0103 这种
-      name,          // egret
-      hex: ("#" + String(hex).replace(/^#/, "")).toUpperCase(),
-      rgb,
-      lab
-    });
-  }
-  return list;
-}
-
-
-// 在 fetch 成功后，补一行
-// 👉 注意：是加在 .then(data => { ... }) 里面
-
+  // =========================
+  // DOM
+  // =========================
   const fileEl = document.getElementById('file');
   const uploadBtn = document.getElementById('uploadBtn');
   const kEl = document.getElementById('k');
   const stepEl = document.getElementById('step');
   const modeEl = document.getElementById('mode');
-  const mergeStrengthEl = document.getElementById('mergeStrength'); // ✅ 新增
+  const mergeStrengthEl = document.getElementById('mergeStrength');
   const runEl = document.getElementById('run');
   const pickEl = document.getElementById('pick');
   const statusEl = document.getElementById('status');
@@ -378,7 +351,9 @@ function normalizePantoneDB(raw){
   let lastResult = null;   // 普通分析结果
   let lastRender = null;   // 最终渲染/导出数据（分析或吸色）
 
-  // ========= 初始化：聚类颜色数 1 - 15 =========
+  // =========================
+  // 初始化：聚类颜色数 1 - 15
+  // =========================
   (function initKOptions(){
     const frag = document.createDocumentFragment();
     for(let i=1;i<=15;i++){
@@ -401,26 +376,29 @@ function normalizePantoneDB(raw){
 
   uploadBtn.addEventListener('click', () => fileEl.click());
 
+  // =========================
+  // 基础工具
+  // =========================
   function dist2(a,b){
     const dr=a[0]-b[0], dg=a[1]-b[1], db=a[2]-b[2];
     return dr*dr + dg*dg + db*db;
   }
 
+  function clamp255(n){ return Math.max(0, Math.min(255, Math.round(n))); }
+
   function rgbToHexStr(rgb){
-    const to2 = (n)=> Math.max(0, Math.min(255, Math.round(n))).toString(16).padStart(2,'0');
+    const to2 = (n)=> clamp255(n).toString(16).padStart(2,'0');
     return ("#" + to2(rgb.r) + to2(rgb.g) + to2(rgb.b)).toUpperCase();
   }
-  
+
   function hexToRgb(hex){
-  if(!hex) return null;
-  hex = String(hex).trim().replace(/^#/, "");
-  if(hex.length === 3) hex = hex.split("").map(c=>c+c).join("");
-  if(hex.length !== 6) return null;
-
-  const n = parseInt(hex, 16);
-  return { r:(n>>16)&255, g:(n>>8)&255, b:n&255 };
-}
-
+    if(!hex) return null;
+    let h = String(hex).trim().replace(/^#/,'');
+    if(h.length === 3) h = h.split('').map(ch=>ch+ch).join('');
+    if(h.length !== 6) return null;
+    const n = parseInt(h, 16);
+    return { r:(n>>16)&255, g:(n>>8)&255, b:n&255 };
+  }
 
   function rgbToCmyk(rgb){
     let r = rgb.r/255, g = rgb.g/255, b = rgb.b/255;
@@ -435,7 +413,9 @@ function normalizePantoneDB(raw){
     return { c:to100(c), m:to100(m), y:to100(y), k:to100(k) };
   }
 
-  // ====== RGB -> Lab & ΔE（用于“相近合并”） ======
+  // =========================
+  // RGB -> Lab & ΔE
+  // =========================
   function srgbToLinear(u){
     u = u / 255;
     return (u <= 0.04045) ? (u / 12.92) : Math.pow((u + 0.055) / 1.055, 2.4);
@@ -469,7 +449,99 @@ function normalizePantoneDB(raw){
     return Math.sqrt(dL*dL + da*da + db*db);
   }
 
-  // ===== K-means++ init =====
+  // =========================
+  // ✅ Pantone：归一化 + 匹配
+  // pantone-numbers.json 结构（你截图里是 object）：
+  // { "11-0103": { name:"egret", hex:"f3ece0" }, ... }
+  // =========================
+  function normalizePantoneDB(raw){
+    const out = [];
+
+    if(Array.isArray(raw)){
+      // 兼容数组格式：[{code,name,hex}] 或类似
+      for(const row of raw){
+        const code = row.code || row.number || row.id || row.pantone || "";
+        const name = row.name || row.label || "";
+        const hex  = row.hex  || row.value || row.rgb || "";
+        const rgb = hexToRgb(hex);
+        if(!rgb) continue;
+        out.push({ code:String(code), name:String(name), hex:rgbToHexStr(rgb), rgb, lab: rgbToLab(rgb) });
+      }
+      return out;
+    }
+
+    if(raw && typeof raw === "object"){
+      // 你当前的格式：key -> {name,hex}
+      const keys = Object.keys(raw);
+      for(const code of keys){
+        const v = raw[code];
+        const name = (v && v.name != null) ? String(v.name) : "";
+        const hex = (v && v.hex != null) ? String(v.hex) : "";
+        const rgb = hexToRgb(hex);
+        if(!rgb) continue;
+        out.push({ code:String(code), name, hex:rgbToHexStr(rgb), rgb, lab: rgbToLab(rgb) });
+      }
+      return out;
+    }
+
+    return out;
+  }
+
+  function matchNearestPantone(rgb){
+    if(!PANTONE_READY || !PANTONE_LIST.length) return null;
+
+    const key = rgbToHexStr(rgb);
+    if(PANTONE_MATCH_CACHE.has(key)) return PANTONE_MATCH_CACHE.get(key);
+
+    const lab = rgbToLab(rgb);
+    let best = null;
+    let bestDE = Infinity;
+
+    for(const p of PANTONE_LIST){
+      const de = deltaE76(lab, p.lab);
+      if(de < bestDE){
+        bestDE = de;
+        best = p;
+        // 很接近就提前结束（加速）
+        if(bestDE < 0.6) break;
+      }
+    }
+
+    const res = best ? { code: best.code, name: best.name, hex: best.hex, de: bestDE } : null;
+    PANTONE_MATCH_CACHE.set(key, res);
+    return res;
+  }
+
+  // ✅ 加载 Pantone 数据（只在这里做一次）
+  (function loadPantone(){
+    fetch('./pantone-numbers.json')
+      .then(res => {
+        if(!res.ok) throw new Error("HTTP " + res.status);
+        return res.json();
+      })
+      .then(data => {
+        PANTONE_RAW = data;
+        PANTONE_LIST = normalizePantoneDB(data);
+        PANTONE_READY = PANTONE_LIST.length > 0;
+        console.log("Pantone normalized:", PANTONE_LIST.length);
+
+        // 如果用户已经做过分析，Pantone 加载后自动刷新一次列表显示
+        if(lastResult){
+          renderFromResult(lastResult);
+        }else if(lastRender && lastRender.items){
+          renderFromRenderedItems(lastRender.items);
+        }
+      })
+      .catch(err => {
+        PANTONE_READY = false;
+        PANTONE_LIST = [];
+        console.warn("Pantone load failed:", err);
+      });
+  })();
+
+  // =========================
+  // K-means++
+  // =========================
   function initKMeansPP(pixels, k){
     const centers = [];
     const n = pixels.length;
@@ -564,11 +636,15 @@ function normalizePantoneDB(raw){
       const rgb = applyModeToColor(it.center, mode);
       const hex = rgbToHexStr(rgb);
       const cmyk = rgbToCmyk(rgb);
-      return { rgb, hex, cmyk, pct: it.pct, count: it.count };
+
+      const pantone = matchNearestPantone(rgb); // ✅ Pantone 匹配
+      return { rgb, hex, cmyk, pct: it.pct, count: it.count, pantone };
     });
   }
 
-  // ===== “相近合并”：用 Lab ΔE，把接近的颜色合并 =====
+  // =========================
+  // 相近合并：Lab ΔE
+  // =========================
   function mergeSimilarByDeltaE(items, thresholdDE = 12){
     const sorted = items.slice().sort((a,b)=> b.pct - a.pct);
 
@@ -595,11 +671,7 @@ function normalizePantoneDB(raw){
         g.sumCount += it.count;
         g.sumPct += it.pct;
 
-        const rgb = {
-          r: g.sumR / g.sumCount,
-          g: g.sumG / g.sumCount,
-          b: g.sumB / g.sumCount
-        };
+        const rgb = { r: g.sumR / g.sumCount, g: g.sumG / g.sumCount, b: g.sumB / g.sumCount };
         g.lab = rgbToLab(rgb);
       } else {
         groups.push({
@@ -614,14 +686,11 @@ function normalizePantoneDB(raw){
     }
 
     const merged = groups.map(g=>{
-      const rgb = {
-        r: Math.round(g.sumR / g.sumCount),
-        g: Math.round(g.sumG / g.sumCount),
-        b: Math.round(g.sumB / g.sumCount)
-      };
+      const rgb = { r: Math.round(g.sumR / g.sumCount), g: Math.round(g.sumG / g.sumCount), b: Math.round(g.sumB / g.sumCount) };
       const hex = rgbToHexStr(rgb);
       const cmyk = rgbToCmyk(rgb);
-      return { rgb, hex, cmyk, pct: g.sumPct, count: g.sumCount };
+      const pantone = matchNearestPantone(rgb);
+      return { rgb, hex, cmyk, pct: g.sumPct, count: g.sumCount, pantone };
     });
 
     merged.sort((a,b)=> b.pct - a.pct);
@@ -630,16 +699,30 @@ function normalizePantoneDB(raw){
     return merged;
   }
 
-  // ===== Render（统一入口）=====
+  // =========================
+  // Render（统一入口）
+  // =========================
   function renderFromRenderedItems(rendered){
     if(!rendered || !rendered.length) return;
 
-    const showLegend = rendered.length <= 6;
-    lastRender = { items: rendered, showLegend };
+    // 重新附加 pantone（确保 pantone 后加载也能刷新）
+    const refreshed = rendered.map(it=>{
+      const pantone = matchNearestPantone(it.rgb);
+      return { ...it, pantone };
+    });
 
-    const labels = rendered.map(it => it.hex);
-    const colors = rendered.map(it=> `rgb(${it.rgb.r},${it.rgb.g},${it.rgb.b})`);
-    const data = rendered.map(it=> Number(it.pct.toFixed(2)));
+    const showLegend = refreshed.length <= 6;
+    lastRender = { items: refreshed, showLegend };
+
+    const labels = refreshed.map(it => it.hex);
+    const colors = refreshed.map(it=> `rgb(${it.rgb.r},${it.rgb.g},${it.rgb.b})`);
+    const data = refreshed.map(it=> Number(it.pct.toFixed(2)));
+
+    // 等 Chart.js 真正加载好（避免你那种网络失败导致的报错）
+    if(typeof Chart === "undefined"){
+      setStatus("Chart.js 未加载成功（请刷新或换网络）。");
+      return;
+    }
 
     if(chart) chart.destroy();
     chart = new Chart(pieCanvas.getContext('2d'), {
@@ -651,8 +734,6 @@ function normalizePantoneDB(raw){
           backgroundColor: colors,
           borderWidth: 1,
           borderColor: "rgba(255,255,255,0.35)",
-
-          // ✅ hover 只外扩，不变色
           hoverOffset: 8,
           hoverBackgroundColor: colors,
           hoverBorderColor: "rgba(255,255,255,0.35)",
@@ -682,7 +763,16 @@ function normalizePantoneDB(raw){
 
     // list
     listEl.innerHTML = "";
-    rendered.forEach((it)=>{
+    refreshed.forEach((it)=>{
+      const p = it.pantone;
+
+      const pantoneLine = PANTONE_READY
+        ? (p
+            ? `<div class="small muted">Pantone：<span class="mono">${escapeHtml(p.code)}</span> · ${escapeHtml(p.name || "")} <span class="muted">（ΔE ${p.de.toFixed(2)}）</span></div>`
+            : `<div class="small muted">Pantone：未匹配到</div>`
+          )
+        : `<div class="small muted">Pantone：未加载（检查 pantone-numbers.json）</div>`;
+
       const div = document.createElement('div');
       div.className = 'item';
       div.innerHTML = `
@@ -692,6 +782,7 @@ function normalizePantoneDB(raw){
             <div class="mono">${it.hex}</div>
             <div class="small muted">RGB(${it.rgb.r}, ${it.rgb.g}, ${it.rgb.b})</div>
             <div class="small muted">CMYK(${it.cmyk.c}, ${it.cmyk.m}, ${it.cmyk.y}, ${it.cmyk.k}) (approx.)</div>
+            ${pantoneLine}
           </div>
         </div>
         <div style="text-align:right;">
@@ -709,6 +800,15 @@ function normalizePantoneDB(raw){
     renderFromRenderedItems(rendered);
   }
 
+  function escapeHtml(s){
+    return String(s)
+      .replaceAll("&","&amp;")
+      .replaceAll("<","&lt;")
+      .replaceAll(">","&gt;")
+      .replaceAll('"',"&quot;")
+      .replaceAll("'","&#39;");
+  }
+
   modeEl.addEventListener('change', ()=>{
     if(lastResult){
       renderFromResult(lastResult);
@@ -718,6 +818,9 @@ function normalizePantoneDB(raw){
     }
   });
 
+  // =========================
+  // 文件加载
+  // =========================
   function loadFile(file){
     if(!file) return;
     const url = URL.createObjectURL(file);
@@ -726,7 +829,7 @@ function normalizePantoneDB(raw){
       currentImage = img;
       previewEl.src = url;
       previewEl.classList.remove('empty');
-      setStatus(`已录入：${file.name}（${img.width}×${img.height}）`);
+      setStatus(`已录入：${file.name}（${img.width}×${img.height}）${PANTONE_READY ? " · Pantone OK" : " · Pantone loading..."}`);
       enableRun(true);
       enablePick(true);
       showExports(false);
@@ -739,6 +842,9 @@ function normalizePantoneDB(raw){
 
   fileEl.addEventListener('change', (e)=> loadFile(e.target.files?.[0]));
 
+  // =========================
+  // 取样像素
+  // =========================
   function getSampledPixelsFromImage(){
     const step = parseInt(stepEl.value, 10);
     const c = document.createElement('canvas');
@@ -767,6 +873,9 @@ function normalizePantoneDB(raw){
     return { pixels, step };
   }
 
+  // =========================
+  // 分析
+  // =========================
   function analyze(){
     if(!currentImage){
       alert("请先录入一张图片（点击“录入”或拖拽到按钮上）");
@@ -788,12 +897,12 @@ function normalizePantoneDB(raw){
       const result = kmeansRGB(pixels, k, 35);
       lastResult = result;
       renderFromResult(result);
-      setStatus(`完成：${k} 色聚类（抽样步长 ${step}，样本 ${pixels.length}）`);
+      setStatus(`完成：${k} 色聚类（抽样步长 ${step}，样本 ${pixels.length}）${PANTONE_READY ? " · Pantone matched" : ""}`);
       showExports(true);
     }, 20);
   }
 
-  // ✅ 吸色：固定 15 色 → 读取强度 → ΔE 合并
+  // 吸色：固定 15 色 → ΔE 合并
   function pickColors(){
     if(!currentImage){
       alert("请先录入一张图片（点击“录入”或拖拽到按钮上）");
@@ -802,7 +911,7 @@ function normalizePantoneDB(raw){
 
     const K_PICK = 15;
     const mode = modeEl.value;
-    const DE_TH = parseInt(mergeStrengthEl.value, 10) || 12;  // ✅ 新增：读取强度
+    const DE_TH = parseInt(mergeStrengthEl.value, 10) || 12;
 
     setStatus(`吸色中…（15色 → 相近合并：ΔE≤${DE_TH}）`);
     showExports(false);
@@ -822,7 +931,7 @@ function normalizePantoneDB(raw){
       lastResult = null;
       renderFromRenderedItems(merged);
 
-      setStatus(`吸色完成：15色 → 合并后 ${merged.length} 色（ΔE≤${DE_TH}，抽样步长 ${step}，样本 ${pixels.length}）`);
+      setStatus(`吸色完成：15色 → 合并后 ${merged.length} 色（ΔE≤${DE_TH}，抽样步长 ${step}，样本 ${pixels.length}）${PANTONE_READY ? " · Pantone matched" : ""}`);
       showExports(true);
     }, 20);
   }
@@ -830,7 +939,9 @@ function normalizePantoneDB(raw){
   runEl.addEventListener('click', analyze);
   pickEl.addEventListener('click', pickColors);
 
-  // ===== PNG 导出（饼图截图）=====
+  // =========================
+  // PNG 导出（饼图截图）
+  // =========================
   function exportChartPngWithSignature({ pieOnly }){
     if(!chart) return alert("请先分析/吸色生成饼图");
 
@@ -894,7 +1005,9 @@ function normalizePantoneDB(raw){
   exportPngBtn.addEventListener("click", ()=> exportChartPngWithSignature({ pieOnly:false }));
   exportPieOnlyPngBtn.addEventListener("click", ()=> exportChartPngWithSignature({ pieOnly:true }));
 
-  // ===== SVG 导出（饼图矢量）=====
+  // =========================
+  // SVG 导出（饼图矢量）
+  // =========================
   function svgEscape(s){
     return String(s)
       .replaceAll("&","&amp;")
@@ -1002,7 +1115,9 @@ function normalizePantoneDB(raw){
     downloadSvg(buildPieSvg({ pieOnly:true }), "color-breakdown_jintiao_pie-only.svg");
   });
 
-  // ===== 色卡导出（PNG + SVG）=====
+  // =========================
+  // 色卡导出（PNG + SVG）— ✅加入 Pantone 文案
+  // =========================
   function buildSwatchLayout(n){
     const cols = Math.min(5, Math.max(1, n));
     const rows = Math.ceil(n / cols);
@@ -1019,7 +1134,7 @@ function normalizePantoneDB(raw){
     const gap = 26;
     const cardW = 210;
     const rectH = 140;
-    const textH = 86;
+    const textH = 110;
 
     const W = margin*2 + cols*cardW + (cols-1)*gap;
     const H = margin*2 + rows*(rectH + textH) + (rows-1)*gap + 34;
@@ -1061,9 +1176,18 @@ function normalizePantoneDB(raw){
       ctx.font = "12px ui-monospace, Menlo, Consolas, monospace";
       ctx.fillText(`CMYK: C${it.cmyk.c} M${it.cmyk.m} Y${it.cmyk.y} K${it.cmyk.k}`, tx, ty + 42);
 
+      // Pantone 行
+      const p = it.pantone;
+      ctx.fillStyle = "rgba(0,0,0,0.60)";
+      ctx.font = "12px ui-monospace, Menlo, Consolas, monospace";
+      const pantoneText = (PANTONE_READY && p)
+        ? `Pantone: ${p.code} · ${p.name || ""} (ΔE ${p.de.toFixed(2)})`
+        : `Pantone: ${PANTONE_READY ? "N/A" : "Not loaded"}`;
+      ctx.fillText(pantoneText.slice(0, 34), tx, ty + 62);
+
       ctx.fillStyle = "rgba(0,0,0,0.38)";
       ctx.font = "11px system-ui, -apple-system, Segoe UI, Roboto, PingFang SC, Microsoft YaHei, sans-serif";
-      ctx.fillText(`${it.pct.toFixed(2)}%`, tx, ty + 64);
+      ctx.fillText(`${it.pct.toFixed(2)}%`, tx, ty + 88);
     }
 
     ctx.textBaseline = "bottom";
@@ -1089,7 +1213,7 @@ function normalizePantoneDB(raw){
     const gap = 26;
     const cardW = 210;
     const rectH = 140;
-    const textH = 86;
+    const textH = 110;
 
     const W = margin*2 + cols*cardW + (cols-1)*gap;
     const H = margin*2 + rows*(rectH + textH) + (rows-1)*gap + 34;
@@ -1105,13 +1229,21 @@ function normalizePantoneDB(raw){
       const tx = x;
       const ty = y + rectH + 18;
 
+      const p = it.pantone;
+      const pantoneText = (PANTONE_READY && p)
+        ? `Pantone: ${p.code} · ${p.name || ""} (ΔE ${p.de.toFixed(2)})`
+        : `Pantone: ${PANTONE_READY ? "N/A" : "Not loaded"}`;
+
       body += `
         <rect x="${x}" y="${y}" width="${cardW}" height="${rectH}" fill="${it.hex}" />
         <rect x="${x}" y="${y}" width="${cardW}" height="${rectH}" fill="none" stroke="rgba(0,0,0,0.12)" stroke-width="2" />
+
         <text x="${tx}" y="${ty}" font-family="ui-monospace, Menlo, Consolas, monospace" font-size="16" font-weight="700" fill="#111">${svgEscape(it.hex)}</text>
         <text x="${tx}" y="${ty+22}" font-family="ui-monospace, Menlo, Consolas, monospace" font-size="12" fill="rgba(0,0,0,0.72)">${svgEscape(`RGB: ${it.rgb.r}, ${it.rgb.g}, ${it.rgb.b}`)}</text>
         <text x="${tx}" y="${ty+42}" font-family="ui-monospace, Menlo, Consolas, monospace" font-size="12" fill="rgba(0,0,0,0.65)">${svgEscape(`CMYK: C${it.cmyk.c} M${it.cmyk.m} Y${it.cmyk.y} K${it.cmyk.k}`)}</text>
-        <text x="${tx}" y="${ty+64}" font-family="system-ui, -apple-system, Segoe UI, Roboto, PingFang SC, Microsoft YaHei, sans-serif" font-size="11" fill="rgba(0,0,0,0.38)">${svgEscape(`${it.pct.toFixed(2)}%`)}</text>
+        <text x="${tx}" y="${ty+62}" font-family="ui-monospace, Menlo, Consolas, monospace" font-size="12" fill="rgba(0,0,0,0.60)">${svgEscape(pantoneText)}</text>
+
+        <text x="${tx}" y="${ty+88}" font-family="system-ui, -apple-system, Segoe UI, Roboto, PingFang SC, Microsoft YaHei, sans-serif" font-size="11" fill="rgba(0,0,0,0.38)">${svgEscape(`${it.pct.toFixed(2)}%`)}</text>
       `;
     }
 
@@ -1131,8 +1263,11 @@ function normalizePantoneDB(raw){
   exportSwatchPngBtn.addEventListener("click", exportSwatchPng);
   exportSwatchSvgBtn.addEventListener("click", exportSwatchSvg);
 
-  // ===== 拖拽到按钮上传 =====
+  // =========================
+  // 拖拽到按钮上传
+  // =========================
   function preventDefaults(e){ e.preventDefault(); e.stopPropagation(); }
+
   ["dragenter","dragover"].forEach(type=>{
     uploadBtn.addEventListener(type, (e)=>{
       preventDefaults(e);
@@ -1151,6 +1286,7 @@ function normalizePantoneDB(raw){
     const f = e.dataTransfer.files?.[0];
     if(f) loadFile(f);
   });
+
   window.addEventListener("dragover", (e)=> e.preventDefault());
   window.addEventListener("drop", (e)=> e.preventDefault());
 </script>
