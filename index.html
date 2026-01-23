@@ -401,12 +401,16 @@ function normalizePantoneDB(data){
   return out;
 }
 
+let PANTONE_READY = false;
+let PANTONE_RAW = [];
+let PANTONE_LIST = [];
+
 fetch("./pantone-numbers.json")
   .then(r => r.json())
   .then(data => {
     PANTONE_RAW = data;
     PANTONE_LIST = normalizePantoneDB(data);
-    PANTONE_READY_2 = PANTONE_LIST.length > 0;
+    PANTONE_READY = PANTONE_LIST.length > 0;
     console.log("Pantone loaded:", PANTONE_READY, "items:", PANTONE_LIST.length);
   })
   .catch(err => {
