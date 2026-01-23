@@ -346,6 +346,73 @@ fetch('./pantone-numbers.json')
 
   let lastResult = null;   // 普通分析结果
   let lastRender = null;   // 最终渲染/导出数据（分析或吸色）
+  // ================= Pantone：加载 + 规范化 + 缓存 =================
+let PANTONE_RAW = null;       // 原始 JSON
+let PANTONE_LIST = [];        // 规范化后的 [{name, lab:{L,a,b}}]
+let PANTONE_READY = false;
+const pantoneCache = new Map(); // key: "#RRGGBB" => {name, de}
+
+function pickFirst(obj, keys){
+  for(const k of keys){
+    if(obj && obj[k] !== undefined && obj[k] !== null) return obj[k];
+  }
+  return null;
+}
+
+function parseLabFromPantoneItem(it){
+  // 兼容常见结构：lab:[L,a,b] / lab:{L,a,b} / Lab / LAB / l,a,b / L,a,b / lab_l, lab_a, lab_b ...
+  const labAny = pickFirst(it, ["lab","Lab","LAB","cieLab","CIELab","labD50","LabD50"]);
+  if(Array.isArray(labAny) && labAny.length >= 3){
+    const [L,a,b] = labAny;
+    return { L:Number(L), a:Number(a), b:Number(b) };
+  }
+  if(labAny && typeof labAny === "object"){
+    const L = pickFirst(labAny, ["L","l","lightness"]);
+    const a = pickFirst(labAny, ["a","A"]);
+    const b = pickFirst(labAny, ["b","B"]);
+    if(L!=null && a!=null && b!=null) return { L:Number(L), a:Number(a), b:Number(b) };
+  }
+
+  // 扁平字段
+  const L = pickFirst(it, ["L","l","lab_L","lab_l","LAB_L","cieL","L*"]);
+  const a = pickFirst(it, ["a","lab_a","LAB_A","cieA","a*"]);
+  const b = pickFirst(it, ["b","lab_b","LAB_B","cieB","b*"]);
+  if(L!=null && a!=null && b!=null) return { L:Number(L), a:Number(a), b:Number(b) };
+
+  return null;
+}
+
+function normalizePantoneDB(data){
+  // 兼容：数组 / 对象字典
+  const arr = Array.isArray(data) ? data : Object.values(data || {});
+  const out = [];
+  for(const it of arr){
+    const lab = parseLabFromPantoneItem(it);
+    if(!lab || !isFinite(lab.L) || !isFinite(lab.a) || !isFinite(lab.b)) continue;
+
+    const name =
+      pickFirst(it, ["name","Name","pantone","Pantone","code","Code","number","Number","id","Id"]) ||
+      "Pantone";
+
+    out.push({ name: String(name), lab });
+  }
+  // 有些库会有重复，简单去重一下（同名同 Lab 近似）
+  return out;
+}
+
+fetch("./pantone-numbers.json")
+  .then(r => r.json())
+  .then(data => {
+    PANTONE_RAW = data;
+    PANTONE_LIST = normalizePantoneDB(data);
+    PANTONE_READY = PANTONE_LIST.length > 0;
+    console.log("Pantone loaded:", PANTONE_READY, "items:", PANTONE_LIST.length);
+  })
+  .catch(err => {
+    PANTONE_READY = false;
+    console.warn("Pantone load failed:", err);
+  });
+
 
   // ========= 初始化：聚类颜色数 1 - 15 =========
   (function initKOptions(){
@@ -425,7 +492,32 @@ fetch('./pantone-numbers.json')
     const da = l1.a - l2.a;
     const db = l1.b - l2.b;
     return Math.sqrt(dL*dL + da*da + db*db);
-  }// ===== Pantone 数据规范化（兼容多种 json 结构）=====
+  }// ================= Pantone：最近似匹配（ΔE76） =================
+function findNearestPantoneForRgb(rgb){
+  if(!PANTONE_READY) return null;
+
+  const hex = rgbToHexStr(rgb);
+  if(pantoneCache.has(hex)) return pantoneCache.get(hex);
+
+  const lab = rgbToLab(rgb);
+
+  let best = null;
+  let bestDE = Infinity;
+
+  for(const p of PANTONE_LIST){
+    const de = deltaE76(lab, p.lab);
+    if(de < bestDE){
+      bestDE = de;
+      best = p;
+    }
+  }
+
+  const res = best ? { name: best.name, de: bestDE } : null;
+  pantoneCache.set(hex, res);
+  return res;
+}
+
+  // ===== Pantone 数据规范化（兼容多种 json 结构）=====
 function normalizePantoneData(data){
   // 目标输出：[{ name, code, lab:{L,a,b} }]
   // 兼容常见结构：
@@ -728,6 +820,11 @@ function findNearestPantone(rgb){
       div.className = 'item';
     const pantone = findNearestPantone(it.rgb);
 
+const p = findNearestPantoneForRgb(it.rgb);
+const pantoneLine = p
+  ? `<div class="small muted">Pantone：<span class="mono">${p.name}</span> · ΔE ${p.de.toFixed(2)}</div>`
+  : `<div class="small muted">Pantone：未加载 / 无数据</div>`;
+
 div.innerHTML = `
   <div style="display:flex;align-items:center;gap:10px;">
     <div class="swatch" style="background:${it.hex}"></div>
@@ -735,12 +832,7 @@ div.innerHTML = `
       <div class="mono">${it.hex}</div>
       <div class="small muted">RGB(${it.rgb.r}, ${it.rgb.g}, ${it.rgb.b})</div>
       <div class="small muted">CMYK(${it.cmyk.c}, ${it.cmyk.m}, ${it.cmyk.y}, ${it.cmyk.k}) (approx.)</div>
-
-      ${
-        pantone
-          ? `<div class="small muted">Pantone（近似）: ${pantone.code || ''} ${pantone.name || ''} · ΔE ${pantone.de.toFixed(1)}</div>`
-          : `<div class="small muted">Pantone：未加载（请用本地服务器打开）</div>`
-      }
+      ${pantoneLine}
     </div>
   </div>
   <div style="text-align:right;">
@@ -748,6 +840,7 @@ div.innerHTML = `
     <div class="small muted">${it.count} px</div>
   </div>
 `;
+
 
       listEl.appendChild(div);
     });
