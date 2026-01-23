@@ -298,6 +298,24 @@
 </div>
 
 <script>
+  // ===== Pantone 数据加载（放在最上面）=====
+  let PANTONE_RAW = null;
+  let PANTONE_READY = false;
+
+  fetch("./pantone-numbers.json")
+    .then(r => {
+      if (!r.ok) throw new Error("Pantone JSON not found");
+      return r.json();
+    })
+    .then(data => {
+      PANTONE_RAW = data;
+      PANTONE_READY = true;
+      console.log("✅ Pantone loaded:", Array.isArray(data) ? data.length : data);
+    })
+    .catch(err => {
+      PANTONE_READY = false;
+      console.warn("⚠️ Pantone load failed:", err);
+    });
   const fileEl = document.getElementById('file');
   const uploadBtn = document.getElementById('uploadBtn');
   const kEl = document.getElementById('k');
