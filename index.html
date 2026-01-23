@@ -166,6 +166,7 @@
     }
     .preview.empty{ min-height:320px; }
 
+    /* 固定图表区域高度，避免被 legend 挤压 */
     .chart-wrap{
       height: 420px;
       width: 100%;
@@ -265,9 +266,6 @@
 
         <button id="exportSwatchPng" class="btn btn-ghost" type="button">导出色卡PNG</button>
         <button id="exportSwatchSvg" class="btn btn-ghost" type="button">导出色卡SVG</button>
-
-        <button id="exportPickSwatchPng" class="btn btn-ghost" type="button">导出吸色色卡PNG（≥5%）</button>
-        <button id="exportPickSwatchSvg" class="btn btn-ghost" type="button">导出吸色色卡SVG（≥5%）</button>
       </div>
 
       <span id="status" class="small muted"></span>
@@ -312,17 +310,17 @@
   const exportSwatchPngBtn = document.getElementById('exportSwatchPng');
   const exportSwatchSvgBtn = document.getElementById('exportSwatchSvg');
 
-  const exportPickSwatchPngBtn = document.getElementById('exportPickSwatchPng');
-  const exportPickSwatchSvgBtn = document.getElementById('exportPickSwatchSvg');
-
   const SIGN_TEXT = "Color Breakdown · JINTiao";
 
   let currentImage = null;
   let chart = null;
 
-  let lastResult = null;        // K-means raw result
-  let lastRender = null;        // K-means rendered items
-  let lastPickRender = null;    // pick rendered items (+ base)
+  // 最近一次聚类结果（普通分析）
+  let lastResult = null;  // { centers, counts }
+
+  // 最近一次用于导出/渲染的数据（无论“分析”还是“吸色”最终都会落到这里）
+  // { items: [{rgb:{r,g,b}, pct, count, hex, cmyk:{c,m,y,k}}], showLegend }
+  let lastRender = null;
 
   // ========= 初始化：聚类颜色数 1 - 15 =========
   (function initKOptions(){
@@ -338,11 +336,12 @@
 
   function setStatus(msg){ statusEl.textContent = msg || ""; }
   function showExports(show){ exportsWrap.classList.toggle('show', !!show); }
-  function enableBtn(btn, enable){ btn.classList.toggle('disabled', !enable); }
+  function enableRun(enable){ runEl.classList.toggle('disabled', !enable); }
+  function enablePick(enable){ pickEl.classList.toggle('disabled', !enable); }
 
   showExports(false);
-  enableBtn(runEl,false);
-  enableBtn(pickEl,false);
+  enableRun(false);
+  enablePick(false);
 
   uploadBtn.addEventListener('click', () => fileEl.click());
 
@@ -369,15 +368,48 @@
     return { c:to100(c), m:to100(m), y:to100(y), k:to100(k) };
   }
 
-  function applyModeToColor(center, mode){
-    const r = Math.round(center[0]);
-    const g = Math.round(center[1]);
-    const b = Math.round(center[2]);
-    if(mode === "mono"){
-      const l = Math.round(0.299*r + 0.587*g + 0.114*b);
-      return { r:l, g:l, b:l };
-    }
-    return { r, g, b };
+  // ====== RGB -> Lab & ΔE（用于“相近合并”） ======
+  function srgbToLinear(u){
+    u = u / 255;
+    return (u <= 0.04045) ? (u / 12.92) : Math.pow((u + 0.055) / 1.055, 2.4);
+  }
+  function rgbToXyz(rgb){
+    const r = srgbToLinear(rgb.r);
+    const g = srgbToLinear(rgb.g);
+    const b = srgbToLinear(rgb.b);
+
+    // D65
+    const x = r*0.4124564 + g*0.3575761 + b*0.1804375;
+    const y = r*0.2126729 + g*0.7151522 + b*0.0721750;
+    const z = r*0.0193339 + g*0.1191920 + b*0.9503041;
+
+    return { x, y, z };
+  }
+  function xyzToLab(xyz){
+    // D65 reference white
+    const Xn = 0.95047, Yn = 1.00000, Zn = 1.08883;
+    let x = xyz.x / Xn;
+    let y = xyz.y / Yn;
+    let z = xyz.z / Zn;
+
+    const f = (t)=> (t > 0.008856) ? Math.cbrt(t) : (7.787*t + 16/116);
+
+    const fx = f(x), fy = f(y), fz = f(z);
+
+    const L = 116*fy - 16;
+    const a = 500*(fx - fy);
+    const b = 200*(fy - fz);
+
+    return { L, a, b };
+  }
+  function rgbToLab(rgb){
+    return xyzToLab(rgbToXyz(rgb));
+  }
+  function deltaE76(l1, l2){
+    const dL = l1.L - l2.L;
+    const da = l1.a - l2.a;
+    const db = l1.b - l2.b;
+    return Math.sqrt(dL*dL + da*da + db*db);
   }
 
   // ===== K-means++ init =====
@@ -454,8 +486,219 @@
     return { centers, counts };
   }
 
-  // ===== 公共：拿抽样像素 =====
-  function getSamplePixelsFromImage(){
+  function applyModeToColor(center, mode){
+    const r = Math.round(center[0]);
+    const g = Math.round(center[1]);
+    const b = Math.round(center[2]);
+    if(mode === "mono"){
+      const l = Math.round(0.299*r + 0.587*g + 0.114*b);
+      return { r:l, g:l, b:l };
+    }
+    return { r, g, b };
+  }
+
+  function makeRenderedItemsFromKMeans(result, mode){
+    const total = result.counts.reduce((a,b)=>a+b,0);
+    let items = result.centers.map((c,i)=>({
+      center: c,
+      count: result.counts[i],
+      pct: result.counts[i] / total * 100
+    }));
+    items.sort((a,b)=> b.pct - a.pct);
+
+    return items.map(it=>{
+      const rgb = applyModeToColor(it.center, mode);
+      const hex = rgbToHexStr(rgb);
+      const cmyk = rgbToCmyk(rgb);
+      return { rgb, hex, cmyk, pct: it.pct, count: it.count };
+    });
+  }
+
+  // ===== “相近合并”：用 Lab ΔE，把接近的颜色合并成更少的代表色 =====
+  function mergeSimilarByDeltaE(items, thresholdDE = 12){
+    // items: [{rgb, pct, count, hex, cmyk}]
+    // 先按占比从大到小（让“大色”吸附“小色”）
+    const sorted = items.slice().sort((a,b)=> b.pct - a.pct);
+
+    const groups = []; // each: { sumR,sumG,sumB,sumCount, sumPct, members:[...], lab }
+    for(const it of sorted){
+      const lab = rgbToLab(it.rgb);
+
+      let bestIdx = -1;
+      let bestDE = Infinity;
+
+      for(let gi=0; gi<groups.length; gi++){
+        const de = deltaE76(lab, groups[gi].lab);
+        if(de < bestDE){
+          bestDE = de;
+          bestIdx = gi;
+        }
+      }
+
+      if(bestIdx !== -1 && bestDE <= thresholdDE){
+        const g = groups[bestIdx];
+        // 加权合并：按 count（像素数）权重
+        g.sumR += it.rgb.r * it.count;
+        g.sumG += it.rgb.g * it.count;
+        g.sumB += it.rgb.b * it.count;
+        g.sumCount += it.count;
+        g.sumPct += it.pct;
+        g.members.push(it);
+
+        const rgb = {
+          r: g.sumR / g.sumCount,
+          g: g.sumG / g.sumCount,
+          b: g.sumB / g.sumCount
+        };
+        g.lab = rgbToLab(rgb);
+      } else {
+        groups.push({
+          sumR: it.rgb.r * it.count,
+          sumG: it.rgb.g * it.count,
+          sumB: it.rgb.b * it.count,
+          sumCount: it.count,
+          sumPct: it.pct,
+          members: [it],
+          lab
+        });
+      }
+    }
+
+    // 输出合并后的 items
+    const merged = groups.map(g=>{
+      const rgb = {
+        r: Math.round(g.sumR / g.sumCount),
+        g: Math.round(g.sumG / g.sumCount),
+        b: Math.round(g.sumB / g.sumCount)
+      };
+      const hex = rgbToHexStr(rgb);
+      const cmyk = rgbToCmyk(rgb);
+      return {
+        rgb, hex, cmyk,
+        pct: g.sumPct,
+        count: g.sumCount
+      };
+    });
+
+    // 再按占比降序
+    merged.sort((a,b)=> b.pct - a.pct);
+
+    // pct 可能因为浮点累加导致 99.99/100.01，做一次归一
+    const sumPct = merged.reduce((s,x)=>s+x.pct,0) || 1;
+    for(const m of merged) m.pct = (m.pct / sumPct) * 100;
+
+    return merged;
+  }
+
+  // ===== Render（统一入口）=====
+  function renderFromRenderedItems(rendered){
+    if(!rendered || !rendered.length) return;
+
+    const showLegend = rendered.length <= 6;
+    lastRender = { items: rendered, showLegend };
+
+    const labels = rendered.map(it => it.hex);
+    const colors = rendered.map(it=> `rgb(${it.rgb.r},${it.rgb.g},${it.rgb.b})`);
+    const data = rendered.map(it=> Number(it.pct.toFixed(2)));
+
+    if(chart) chart.destroy();
+    chart = new Chart(pieCanvas.getContext('2d'), {
+      type:'pie',
+      data:{
+        labels,
+        datasets:[{
+          data,
+          backgroundColor: colors,
+          borderWidth: 1,
+
+          // ✅ hover 微微向外扩张（不变黄）
+          hoverOffset: 10,
+          hoverBorderWidth: 1
+        }]
+      },
+      options:{
+        responsive:true,
+        maintainAspectRatio:false,
+        rotation: -90 * Math.PI / 180, // 12点开始
+        plugins:{
+          legend:{
+            display: showLegend,
+            position:'bottom',
+            labels:{
+              color:'#eaeaea',
+              boxWidth: 14,
+              boxHeight: 10,
+              padding: 10,
+              font:{ size: 11 }
+            }
+          },
+          tooltip:{ callbacks:{ label:(ctx)=>`${ctx.label}: ${ctx.parsed.toFixed(2)}%` } }
+        }
+      }
+    });
+
+    // list
+    listEl.innerHTML = "";
+    rendered.forEach((it)=>{
+      const div = document.createElement('div');
+      div.className = 'item';
+      div.innerHTML = `
+        <div style="display:flex;align-items:center;gap:10px;">
+          <div class="swatch" style="background:${it.hex}"></div>
+          <div>
+            <div class="mono">${it.hex}</div>
+            <div class="small muted">RGB(${it.rgb.r}, ${it.rgb.g}, ${it.rgb.b})</div>
+            <div class="small muted">CMYK(${it.cmyk.c}, ${it.cmyk.m}, ${it.cmyk.y}, ${it.cmyk.k}) (approx.)</div>
+          </div>
+        </div>
+        <div style="text-align:right;">
+          <div style="font-weight:700;">${it.pct.toFixed(2)}%</div>
+          <div class="small muted">${it.count} px</div>
+        </div>
+      `;
+      listEl.appendChild(div);
+    });
+  }
+
+  // 普通“分析”：直接用当前 k
+  function renderFromResult(result){
+    const mode = modeEl.value;
+    const rendered = makeRenderedItemsFromKMeans(result, mode);
+    renderFromRenderedItems(rendered);
+  }
+
+  modeEl.addEventListener('change', ()=>{
+    if(lastResult){
+      renderFromResult(lastResult);
+      setStatus(`模式切换：已更新显示（${modeEl.value === 'mono' ? '灰阶' : '彩色'}）`);
+    } else if(lastRender){
+      // 如果只有吸色结果（lastRender），切换模式需要重新跑一次吸色更合理
+      setStatus(`已切换模式：请重新点击“开始分析/开始吸色”以按新模式计算`);
+    }
+  });
+
+  function loadFile(file){
+    if(!file) return;
+    const url = URL.createObjectURL(file);
+    const img = new Image();
+    img.onload = () => {
+      currentImage = img;
+      previewEl.src = url;
+      previewEl.classList.remove('empty');
+      setStatus(`已录入：${file.name}（${img.width}×${img.height}）`);
+      enableRun(true);
+      enablePick(true);
+      showExports(false);
+      lastResult = null;
+      lastRender = null;
+    };
+    img.onerror = () => setStatus("图片加载失败");
+    img.src = url;
+  }
+
+  fileEl.addEventListener('change', (e)=> loadFile(e.target.files?.[0]));
+
+  function getSampledPixelsFromImage(){
     const step = parseInt(stepEl.value, 10);
 
     const c = document.createElement('canvas');
@@ -481,167 +724,8 @@
         pixels.push([d[i], d[i+1], d[i+2]]);
       }
     }
-    return pixels;
+    return { pixels, step };
   }
-
-  // ===== ✅ 关键：饼图 hover 外扩（不变黄） =====
-  function buildPieChart(items){
-    const showLegend = items.length <= 6;
-    const labels = items.map(it => it.hex);
-    const colors = items.map(it=> `rgb(${it.rgb.r},${it.rgb.g},${it.rgb.b})`);
-    const data = items.map(it=> Number(it.pct.toFixed(2)));
-
-    if(chart) chart.destroy();
-
-    // 电脑 10、手机 6（更稳）
-    const isCoarse = window.matchMedia && window.matchMedia('(pointer: coarse)').matches;
-
-    chart = new Chart(pieCanvas.getContext('2d'), {
-      type:'pie',
-      data:{
-        labels,
-        datasets:[{
-          data,
-          backgroundColor: colors,
-
-          // ✅ hover 不改色，直接外扩
-          hoverBackgroundColor: colors,
-          hoverOffset: isCoarse ? 6 : 10,
-
-          borderColor: "rgba(255,255,255,0.55)",
-          hoverBorderColor: "rgba(255,255,255,0.55)",
-          borderWidth: 1,
-          hoverBorderWidth: 1
-        }]
-      },
-      options:{
-        responsive:true,
-        maintainAspectRatio:false,
-        rotation: -90 * Math.PI / 180,
-        plugins:{
-          legend:{
-            display: showLegend,
-            position:'bottom',
-            labels:{
-              color:'#eaeaea',
-              boxWidth: 14,
-              boxHeight: 10,
-              padding: 10,
-              font:{ size: 11 }
-            }
-          },
-          tooltip:{ callbacks:{ label:(ctx)=>`${ctx.label}: ${ctx.parsed.toFixed(2)}%` } }
-        }
-      }
-    });
-  }
-
-  function renderList(items){
-    listEl.innerHTML = "";
-    items.forEach((it)=>{
-      const div = document.createElement('div');
-      div.className = 'item';
-      div.innerHTML = `
-        <div style="display:flex;align-items:center;gap:10px;">
-          <div class="swatch" style="background:${it.hex}"></div>
-          <div>
-            <div class="mono">${it.hex}</div>
-            <div class="small muted">RGB(${it.rgb.r}, ${it.rgb.g}, ${it.rgb.b})</div>
-            <div class="small muted">CMYK(${it.cmyk.c}, ${it.cmyk.m}, ${it.cmyk.y}, ${it.cmyk.k}) (approx.)</div>
-          </div>
-        </div>
-        <div style="text-align:right;">
-          <div style="font-weight:700;">${it.pct.toFixed(2)}%</div>
-          <div class="small muted">${it.count} px</div>
-        </div>
-      `;
-      listEl.appendChild(div);
-    });
-  }
-
-  function renderItemsToUI(items){
-    if(!items || !items.length){
-      if(chart){ chart.destroy(); chart=null; }
-      listEl.innerHTML = "";
-      return;
-    }
-    buildPieChart(items);
-    renderList(items);
-  }
-
-  // ===== K-means 渲染 =====
-  function renderFromResult(result){
-    if(!result) return;
-
-    const mode = modeEl.value;
-    const total = result.counts.reduce((a,b)=>a+b,0);
-
-    let items = result.centers.map((c,i)=>({
-      center: c,
-      count: result.counts[i],
-      pct: result.counts[i] / total * 100
-    }));
-
-    items.sort((a,b)=> b.pct - a.pct);
-
-    const rendered = items.map(it=>{
-      const rgb = applyModeToColor(it.center, mode);
-      const hex = rgbToHexStr(rgb);
-      const cmyk = rgbToCmyk(rgb);
-      return { rgb, hex, cmyk, pct: it.pct, count: it.count };
-    });
-
-    lastRender = { items: rendered };
-    renderItemsToUI(rendered);
-  }
-
-  // ===== 模式切换：吸色优先，否则聚类 =====
-  modeEl.addEventListener('change', ()=>{
-    if(lastPickRender){
-      const mode = modeEl.value;
-      const base = lastPickRender._baseCenters;
-      const total = lastPickRender._total;
-
-      const rendered = base.map(b=>{
-        const rgb = applyModeToColor([b.r,b.g,b.b], mode);
-        const hex = rgbToHexStr(rgb);
-        const cmyk = rgbToCmyk(rgb);
-        return { rgb, hex, cmyk, pct: b.count/total*100, count: b.count };
-      }).sort((a,b)=> b.pct - a.pct);
-
-      lastPickRender.items = rendered;
-      renderItemsToUI(rendered);
-      return;
-    }
-    if(lastResult) renderFromResult(lastResult);
-  });
-
-  function loadFile(file){
-    if(!file) return;
-    const url = URL.createObjectURL(file);
-    const img = new Image();
-    img.onload = () => {
-      currentImage = img;
-      previewEl.src = url;
-      previewEl.classList.remove('empty');
-      setStatus(`已录入：${file.name}（${img.width}×${img.height}）`);
-
-      enableBtn(runEl,true);
-      enableBtn(pickEl,true);
-      showExports(false);
-
-      lastResult = null;
-      lastRender = null;
-      lastPickRender = null;
-
-      if(chart){ chart.destroy(); chart=null; }
-      listEl.innerHTML = "";
-    };
-    img.onerror = () => setStatus("图片加载失败");
-    img.src = url;
-  }
-
-  fileEl.addEventListener('change', (e)=> loadFile(e.target.files?.[0]));
 
   function analyze(){
     if(!currentImage){
@@ -654,109 +738,66 @@
     setStatus("分析中…");
     showExports(false);
 
-    const pixels = getSamplePixelsFromImage();
+    const { pixels, step } = getSampledPixelsFromImage();
+
     if(pixels.length < k){
       setStatus("样本不足，无法聚类。");
       alert("样本点太少，无法完成聚类。请降低抽样步长或换更大的图。");
       return;
     }
 
-    // 清空吸色结果
-    lastPickRender = null;
-
     setTimeout(()=>{
       const result = kmeansRGB(pixels, k, 35);
       lastResult = result;
       renderFromResult(result);
-      setStatus(`完成：${k} 色聚类（抽样步长 ${parseInt(stepEl.value,10)}，样本 ${pixels.length}）`);
+      setStatus(`完成：${k} 色聚类（抽样步长 ${step}，样本 ${pixels.length}）`);
       showExports(true);
     }, 20);
   }
 
-  runEl.addEventListener('click', analyze);
-
-  // ===== 吸色：统计分箱，取 >= 5% =====
+  // “吸色”：固定先跑 15 色，再相近合并（不丢弃小色）
   function pickColors(){
     if(!currentImage){
       alert("请先录入一张图片（点击“录入”或拖拽到按钮上）");
       return;
     }
 
-    setStatus("吸色中…（筛选 ≥ 5%）");
+    const K_PICK = 15;      // ✅ 你要求：先解析 15 色
+    const DE_TH = 12;       // ✅ 合并阈值（中等，布料/照片很稳）
+    const mode = modeEl.value;
+
+    setStatus("吸色中…（15色 → 相近合并）");
     showExports(false);
 
-    const Q = 16;                 // 量化等级
-    const shift = 4;              // Q=16 => >>4
-    const thresholdPct = 5;
-
-    const pixels = getSamplePixelsFromImage();
-    const total = pixels.length;
-
-    const map = new Map();
-    for(const p of pixels){
-      const r = p[0], g = p[1], b = p[2];
-      const qr = r >> shift;
-      const qg = g >> shift;
-      const qb = b >> shift;
-      const key = (qr<<16) | (qg<<8) | qb;
-
-      let v = map.get(key);
-      if(!v){
-        v = { count:0, rs:0, gs:0, bs:0 };
-        map.set(key, v);
-      }
-      v.count++;
-      v.rs += r; v.gs += g; v.bs += b;
-    }
-
-    let bins = [];
-    for(const v of map.values()){
-      const pct = v.count / total * 100;
-      if(pct < thresholdPct) continue;
-
-      const r = Math.round(v.rs / v.count);
-      const g = Math.round(v.gs / v.count);
-      const b = Math.round(v.bs / v.count);
-      bins.push({ r,g,b, count:v.count, pct });
-    }
-
-    bins.sort((a,b)=> b.pct - a.pct);
-
-    if(!bins.length){
-      setStatus(`吸色完成：没有颜色达到 ≥ ${thresholdPct}%（建议降低抽样步长或换更大图）`);
+    const { pixels, step } = getSampledPixelsFromImage();
+    if(pixels.length < K_PICK){
+      setStatus("样本不足，无法吸色。");
+      alert("样本点太少，无法完成吸色。请降低抽样步长或换更大的图。");
       return;
     }
 
-    lastPickRender = {
-      _baseCenters: bins.map(b=>({r:b.r,g:b.g,b:b.b,count:b.count})),
-      _total: total,
-      items: []
-    };
+    setTimeout(()=>{
+      const raw = kmeansRGB(pixels, K_PICK, 35);
+      // 先把 15 色做成 rendered（带 pct/count）
+      const rendered15 = makeRenderedItemsFromKMeans(raw, mode);
+      // 再相近合并（不筛掉小色）
+      const merged = mergeSimilarByDeltaE(rendered15, DE_TH);
 
-    const mode = modeEl.value;
-    const rendered = bins.map(b=>{
-      const rgb = applyModeToColor([b.r,b.g,b.b], mode);
-      const hex = rgbToHexStr(rgb);
-      const cmyk = rgbToCmyk(rgb);
-      return { rgb, hex, cmyk, pct: b.pct, count: b.count };
-    });
+      // 吸色结果也直接渲染到饼图+列表，并用于导出
+      lastResult = null; // 吸色结果不走 lastResult
+      renderFromRenderedItems(merged);
 
-    lastPickRender.items = rendered;
-
-    // 清空聚类结果（避免混淆）
-    lastResult = null;
-    lastRender = null;
-
-    renderItemsToUI(rendered);
-    setStatus(`吸色完成：${rendered.length} 个颜色 ≥ ${thresholdPct}%（样本 ${total}）`);
-    showExports(true);
+      setStatus(`吸色完成：15色 → 合并后 ${merged.length} 色（ΔE≤${DE_TH}，抽样步长 ${step}，样本 ${pixels.length}）`);
+      showExports(true);
+    }, 20);
   }
 
+  runEl.addEventListener('click', analyze);
   pickEl.addEventListener('click', pickColors);
 
   // ===== PNG 导出（饼图截图）=====
   function exportChartPngWithSignature({ pieOnly }){
-    if(!chart) return alert("请先生成饼图");
+    if(!chart) return alert("请先分析/吸色生成饼图");
 
     const doExport = () => {
       const srcCanvas = chart.canvas;
@@ -766,8 +807,10 @@
       out.height = srcCanvas.height;
       const octx = out.getContext("2d");
 
+      // 透明底
       octx.drawImage(srcCanvas, 0, 0);
 
+      // 右下角刻字
       const padding = 14;
       const fontSize = 12;
       octx.font = `${fontSize}px ui-monospace, Menlo, Consolas, monospace`;
@@ -785,7 +828,9 @@
       octx.restore();
 
       const dataUrl = out.toDataURL("image/png");
-      const filename = pieOnly ? "color-breakdown_jintiao_pie-only.png" : "color-breakdown_jintiao.png";
+      const filename = pieOnly
+        ? "color-breakdown_jintiao_pie-only.png"
+        : "color-breakdown_jintiao.png";
 
       const a = document.createElement("a");
       a.href = dataUrl;
@@ -825,7 +870,10 @@
   }
 
   function polarToCartesian(cx, cy, r, angleRad){
-    return { x: cx + r * Math.cos(angleRad), y: cy + r * Math.sin(angleRad) };
+    return {
+      x: cx + r * Math.cos(angleRad),
+      y: cy + r * Math.sin(angleRad)
+    };
   }
 
   function wedgePath(cx, cy, r, startRad, endRad){
@@ -833,8 +881,13 @@
     const p2 = polarToCartesian(cx, cy, r, endRad);
     const delta = endRad - startRad;
     const largeArc = (delta % (Math.PI*2)) > Math.PI ? 1 : 0;
-    const sweep = 1;
-    return `M ${cx} ${cy} L ${p1.x} ${p1.y} A ${r} ${r} 0 ${largeArc} ${sweep} ${p2.x} ${p2.y} Z`;
+    const sweep = 1; // clockwise
+    return [
+      `M ${cx} ${cy}`,
+      `L ${p1.x} ${p1.y}`,
+      `A ${r} ${r} 0 ${largeArc} ${sweep} ${p2.x} ${p2.y}`,
+      `Z`
+    ].join(" ");
   }
 
   function downloadSvg(svgText, filename){
@@ -849,17 +902,11 @@
     URL.revokeObjectURL(url);
   }
 
-  function getActiveItems(){
-    if(lastPickRender?.items?.length) return lastPickRender.items;
-    if(lastRender?.items?.length) return lastRender.items;
-    return null;
-  }
-
   function buildPieSvg({ pieOnly }){
-    const items = getActiveItems();
-    if(!items) return null;
+    if(!lastRender) return null;
 
-    const showLegend = (!pieOnly) && (items.length <= 6);
+    const items = lastRender.items;
+    const showLegend = (!pieOnly) && lastRender.showLegend;
 
     const W = 1200;
     const H = showLegend ? 900 : 820;
@@ -903,7 +950,8 @@
     const sigX = W - 40;
     const sigY = H - 26;
 
-    return `<?xml version="1.0" encoding="UTF-8"?>
+    const svg =
+`<?xml version="1.0" encoding="UTF-8"?>
 <svg xmlns="http://www.w3.org/2000/svg" width="${W}" height="${H}" viewBox="0 0 ${W} ${H}">
   <defs>
     <filter id="softShadow" x="-20%" y="-20%" width="140%" height="140%">
@@ -924,17 +972,18 @@
         fill="rgba(255,255,255,0.28)"
         filter="url(#softShadow)">${svgEscape(SIGN_TEXT)}</text>
 </svg>`;
+    return svg;
   }
 
   exportSvgBtn.addEventListener("click", ()=>{
+    if(!lastRender) return alert("请先分析/吸色生成饼图");
     const svg = buildPieSvg({ pieOnly: false });
-    if(!svg) return alert("请先生成饼图");
     downloadSvg(svg, "color-breakdown_jintiao.svg");
   });
 
   exportPieOnlySvgBtn.addEventListener("click", ()=>{
+    if(!lastRender) return alert("请先分析/吸色生成饼图");
     const svg = buildPieSvg({ pieOnly: true });
-    if(!svg) return alert("请先生成饼图");
     downloadSvg(svg, "color-breakdown_jintiao_pie-only.svg");
   });
 
@@ -945,7 +994,10 @@
     return { cols, rows };
   }
 
-  function exportSwatchPng(items, filename){
+  function exportSwatchPng(){
+    if(!lastRender) return alert("请先分析/吸色得到颜色结果");
+
+    const items = lastRender.items;
     const n = items.length;
     const { cols, rows } = buildSwatchLayout(n);
 
@@ -1008,13 +1060,16 @@
 
     const a = document.createElement("a");
     a.href = c.toDataURL("image/png");
-    a.download = filename;
+    a.download = "color-breakdown_swatch_jintiao.png";
     document.body.appendChild(a);
     a.click();
     a.remove();
   }
 
-  function exportSwatchSvg(items, filename){
+  function exportSwatchSvg(){
+    if(!lastRender) return alert("请先分析/吸色得到颜色结果");
+
+    const items = lastRender.items;
     const n = items.length;
     const { cols, rows } = buildSwatchLayout(n);
 
@@ -1044,16 +1099,22 @@
         <rect x="${x}" y="${y}" width="${cardW}" height="${rectH}" fill="none" stroke="rgba(0,0,0,0.12)" stroke-width="2" />
 
         <text x="${tx}" y="${ty}" font-family="ui-monospace, Menlo, Consolas, monospace" font-size="16" font-weight="700" fill="#111">${svgEscape(it.hex)}</text>
-        <text x="${tx}" y="${ty+22}" font-family="ui-monospace, Menlo, Consolas, monospace" font-size="12" fill="rgba(0,0,0,0.72)">${svgEscape(`RGB: ${it.rgb.r}, ${it.rgb.g}, ${it.rgb.b}`)}</text>
-        <text x="${tx}" y="${ty+42}" font-family="ui-monospace, Menlo, Consolas, monospace" font-size="12" fill="rgba(0,0,0,0.65)">${svgEscape(`CMYK: C${it.cmyk.c} M${it.cmyk.m} Y${it.cmyk.y} K${it.cmyk.k}`)}</text>
-        <text x="${tx}" y="${ty+64}" font-family="system-ui, -apple-system, Segoe UI, Roboto, PingFang SC, Microsoft YaHei, sans-serif" font-size="11" fill="rgba(0,0,0,0.38)">${svgEscape(`${it.pct.toFixed(2)}%`)}</text>
+        <text x="${tx}" y="${ty+22}" font-family="ui-monospace, Menlo, Consolas, monospace" font-size="12" fill="rgba(0,0,0,0.72)">
+          ${svgEscape(`RGB: ${it.rgb.r}, ${it.rgb.g}, ${it.rgb.b}`)}
+        </text>
+        <text x="${tx}" y="${ty+42}" font-family="ui-monospace, Menlo, Consolas, monospace" font-size="12" fill="rgba(0,0,0,0.65)">
+          ${svgEscape(`CMYK: C${it.cmyk.c} M${it.cmyk.m} Y${it.cmyk.y} K${it.cmyk.k}`)}
+        </text>
+        <text x="${tx}" y="${ty+64}" font-family="system-ui, -apple-system, Segoe UI, Roboto, PingFang SC, Microsoft YaHei, sans-serif"
+              font-size="11" fill="rgba(0,0,0,0.38)">${svgEscape(`${it.pct.toFixed(2)}%`)}</text>
       `;
     }
 
     const sigX = W - margin;
     const sigY = H - 16;
 
-    const svg = `<?xml version="1.0" encoding="UTF-8"?>
+    const svg =
+`<?xml version="1.0" encoding="UTF-8"?>
 <svg xmlns="http://www.w3.org/2000/svg" width="${W}" height="${H}" viewBox="0 0 ${W} ${H}">
   <rect x="0" y="0" width="${W}" height="${H}" fill="#ffffff" />
   ${body}
@@ -1062,30 +1123,11 @@
         font-size="12" fill="rgba(0,0,0,0.30)">${svgEscape(SIGN_TEXT)}</text>
 </svg>`;
 
-    downloadSvg(svg, filename);
+    downloadSvg(svg, "color-breakdown_swatch_jintiao.svg");
   }
 
-  exportSwatchPngBtn.addEventListener("click", ()=>{
-    const items = getActiveItems();
-    if(!items) return alert("请先生成颜色结果");
-    exportSwatchPng(items, "color-breakdown_swatch_jintiao.png");
-  });
-  exportSwatchSvgBtn.addEventListener("click", ()=>{
-    const items = getActiveItems();
-    if(!items) return alert("请先生成颜色结果");
-    exportSwatchSvg(items, "color-breakdown_swatch_jintiao.svg");
-  });
-
-  exportPickSwatchPngBtn.addEventListener("click", ()=>{
-    const items = lastPickRender?.items;
-    if(!items || !items.length) return alert("请先点击“开始吸色”生成 ≥5% 颜色");
-    exportSwatchPng(items, "color-breakdown_pick_swatch_ge5_jintiao.png");
-  });
-  exportPickSwatchSvgBtn.addEventListener("click", ()=>{
-    const items = lastPickRender?.items;
-    if(!items || !items.length) return alert("请先点击“开始吸色”生成 ≥5% 颜色");
-    exportSwatchSvg(items, "color-breakdown_pick_swatch_ge5_jintiao.svg");
-  });
+  exportSwatchPngBtn.addEventListener("click", exportSwatchPng);
+  exportSwatchSvgBtn.addEventListener("click", exportSwatchSvg);
 
   // ===== 拖拽到按钮上传 =====
   function preventDefaults(e){ e.preventDefault(); e.stopPropagation(); }
