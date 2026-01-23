@@ -307,15 +307,37 @@
       if (!r.ok) throw new Error("Pantone JSON not found");
       return r.json();
     })
-    .then(data => {
-      PANTONE_RAW = data;
-      PANTONE_READY = true;
-      console.log("✅ Pantone loaded:", Array.isArray(data) ? data.length : data);
-    })
+   .then(data => {
+  PANTONE_RAW = data;
+  PANTONE_LIST = normalizePantoneDB(data);
+  PANTONE_READY = PANTONE_LIST.length > 0;
+  console.log("Pantone normalized:", PANTONE_LIST.length);
+})
+
     .catch(err => {
       PANTONE_READY = false;
       console.warn("⚠️ Pantone load failed:", err);
-    });
+    });let PANTONE_LIST = [];
+
+function normalizePantoneDB(raw){
+  const list = [];
+  for(const name in raw){
+    const rgb = raw[name];
+    if(rgb && typeof rgb.r === "number"){
+      const lab = rgbToLab(rgb);
+      list.push({
+        name,
+        rgb,
+        lab
+      });
+    }
+  }
+  return list;
+}
+
+// 在 fetch 成功后，补一行
+// 👉 注意：是加在 .then(data => { ... }) 里面
+
   const fileEl = document.getElementById('file');
   const uploadBtn = document.getElementById('uploadBtn');
   const kEl = document.getElementById('k');
