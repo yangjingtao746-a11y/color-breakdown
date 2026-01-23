@@ -298,6 +298,26 @@
 </div>
 
 <script>
+  // ===== Pantone DB =====
+let PANTONE_DB = null;        // 原始数据
+let PANTONE_INDEX = null;     // 预计算后的数组（带 Lab）
+let PANTONE_READY = false;
+
+fetch('./pantone-numbers.json')
+  .then(r => {
+    if(!r.ok) throw new Error('HTTP ' + r.status);
+    return r.json();
+  })
+  .then(data => {
+    PANTONE_DB = data;
+    PANTONE_INDEX = normalizePantoneData(data);  // 预处理成统一结构
+    PANTONE_READY = true;
+    console.log('✅ Pantone 数据加载成功：', PANTONE_INDEX.length);
+  })
+  .catch(err => {
+    console.warn('❌ Pantone 数据加载失败：', err);
+  });
+
   const fileEl = document.getElementById('file');
   const uploadBtn = document.getElementById('uploadBtn');
   const kEl = document.getElementById('k');
@@ -405,7 +425,90 @@
     const da = l1.a - l2.a;
     const db = l1.b - l2.b;
     return Math.sqrt(dL*dL + da*da + db*db);
+  }// ===== Pantone 数据规范化（兼容多种 json 结构）=====
+function normalizePantoneData(data){
+  // 目标输出：[{ name, code, lab:{L,a,b} }]
+  // 兼容常见结构：
+  // 1) [{name, number, lab:{l,a,b}}]
+  // 2) [{name, code, L, a, b}]
+  // 3) [{name, number, hex:"#RRGGBB"}]  -> 会用 hex 转 rgb 再转 lab
+  const arr = Array.isArray(data) ? data : (data?.colors || data?.data || []);
+  const out = [];
+
+  for(const item of arr){
+    if(!item) continue;
+
+    const name = item.name || item.pantone || item.title || '';
+    const code = item.number || item.code || item.id || item.pantoneNumber || '';
+
+    // 1) lab in object
+    let lab = null;
+    if(item.lab && (item.lab.l != null || item.lab.L != null)){
+      const L = Number(item.lab.L ?? item.lab.l);
+      const a = Number(item.lab.a);
+      const b = Number(item.lab.b);
+      if(Number.isFinite(L) && Number.isFinite(a) && Number.isFinite(b)){
+        lab = { L, a, b };
+      }
+    }
+
+    // 2) L a b at top-level
+    if(!lab && item.L != null && item.a != null && item.b != null){
+      const L = Number(item.L), a = Number(item.a), b = Number(item.b);
+      if(Number.isFinite(L) && Number.isFinite(a) && Number.isFinite(b)){
+        lab = { L, a, b };
+      }
+    }
+
+    // 3) hex -> rgb -> lab
+    if(!lab && item.hex){
+      const rgb = hexToRgb(item.hex);
+      if(rgb) lab = rgbToLab(rgb);
+    }
+
+    if(!lab) continue;
+
+    out.push({ name, code, lab });
   }
+
+  return out;
+}
+
+function hexToRgb(hex){
+  const s = String(hex).trim().replace('#','');
+  if(!(s.length === 6 || s.length === 3)) return null;
+  const full = s.length === 3 ? s.split('').map(ch=>ch+ch).join('') : s;
+  const n = parseInt(full, 16);
+  if(!Number.isFinite(n)) return null;
+  return { r:(n>>16)&255, g:(n>>8)&255, b:n&255 };
+}
+
+// ===== 找最近 Pantone（ΔE76）=====
+function findNearestPantone(rgb){
+  if(!PANTONE_READY || !PANTONE_INDEX?.length) return null;
+
+  const lab = rgbToLab(rgb);
+
+  let best = null;
+  let bestDE = Infinity;
+
+  for(const p of PANTONE_INDEX){
+    const de = deltaE76(lab, p.lab);
+    if(de < bestDE){
+      bestDE = de;
+      best = p;
+    }
+  }
+
+  if(!best) return null;
+
+  return {
+    name: best.name,
+    code: best.code,
+    de: bestDE
+  };
+}
+
 
   // ===== K-means++ init =====
   function initKMeansPP(pixels, k){
@@ -623,20 +726,29 @@
     rendered.forEach((it)=>{
       const div = document.createElement('div');
       div.className = 'item';
-      div.innerHTML = `
-        <div style="display:flex;align-items:center;gap:10px;">
-          <div class="swatch" style="background:${it.hex}"></div>
-          <div>
-            <div class="mono">${it.hex}</div>
-            <div class="small muted">RGB(${it.rgb.r}, ${it.rgb.g}, ${it.rgb.b})</div>
-            <div class="small muted">CMYK(${it.cmyk.c}, ${it.cmyk.m}, ${it.cmyk.y}, ${it.cmyk.k}) (approx.)</div>
-          </div>
-        </div>
-        <div style="text-align:right;">
-          <div style="font-weight:700;">${it.pct.toFixed(2)}%</div>
-          <div class="small muted">${it.count} px</div>
-        </div>
-      `;
+    const pantone = findNearestPantone(it.rgb);
+
+div.innerHTML = `
+  <div style="display:flex;align-items:center;gap:10px;">
+    <div class="swatch" style="background:${it.hex}"></div>
+    <div>
+      <div class="mono">${it.hex}</div>
+      <div class="small muted">RGB(${it.rgb.r}, ${it.rgb.g}, ${it.rgb.b})</div>
+      <div class="small muted">CMYK(${it.cmyk.c}, ${it.cmyk.m}, ${it.cmyk.y}, ${it.cmyk.k}) (approx.)</div>
+
+      ${
+        pantone
+          ? `<div class="small muted">Pantone（近似）: ${pantone.code || ''} ${pantone.name || ''} · ΔE ${pantone.de.toFixed(1)}</div>`
+          : `<div class="small muted">Pantone：未加载（请用本地服务器打开）</div>`
+      }
+    </div>
+  </div>
+  <div style="text-align:right;">
+    <div style="font-weight:700;">${it.pct.toFixed(2)}%</div>
+    <div class="small muted">${it.count} px</div>
+  </div>
+`;
+
       listEl.appendChild(div);
     });
   }
