@@ -224,39 +224,6 @@
 
     .exports{ display:none; gap:10px; align-items:center; flex-wrap:wrap; }
     .exports.show{ display:flex; }
-    /* 预览区拖拽提示 */
-    /* 预览区域外壳，用来承载提示文字 */
-.preview-wrap{
-  position: relative;
-}
-
-/* 拖拽提示文字 */
-.preview-hint{
-  position: absolute;
-  inset: 0;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  text-align: center;
-  font-size: 14px;
-  line-height: 1.6;
-  color: rgba(255,255,255,0.55);
-  pointer-events: none;
-}
-
-.preview-hint{
-  position:absolute;
-  inset:0;
-  display:flex;
-  align-items:center;
-  justify-content:center;
-  text-align:center;
-  font-size:14px;
-  line-height:1.6;
-  color:rgba(255,255,255,0.55);
-  pointer-events:none;
-}
-
   </style>
 </head>
 
@@ -328,12 +295,9 @@
 
     <div class="hr"></div>
 
-   <div class="preview-hint" id="previewHint">
-  拖拽图片到此处<br />
-  或点击上方「录入」
-</div>
-<img id="preview" class="preview empty" alt="预览" />
-
+    <div class="grid">
+      <div>
+        <img id="preview" class="preview empty" alt="预览" />
       </div>
       <div>
         <div class="chart-wrap">
